@@ -223,7 +223,11 @@ async function loadChat(id, silent) {
   if ($('.fix-box:not(.hidden)', pane) && silent) return; // не перерисовываем, пока пользователь правит черновик
   // черновики ИИ показываем после сообщения клиента, на которое они отвечали (последний прогон)
   const runsByMsg = {};
-  for (const r of d.runs || []) runsByMsg[r.at_message_id] = [r];
+  for (const r of d.runs || []) {
+    const byModel = (runsByMsg[r.at_message_id] ||= {});
+    byModel[r.model || ''] = r; // последний ответ каждой модели
+  }
+  for (const k of Object.keys(runsByMsg)) runsByMsg[k] = Object.values(runsByMsg[k]);
   const box = $('.messages', pane);
   const atBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const draft = $('#composerText')?.value || '';
@@ -276,7 +280,7 @@ async function loadChat(id, silent) {
   });
   busy($('#replayChat'), async () => {
     const r = await api(`/api/chats/${encodeURIComponent(id)}/replay`, { body: { maxTurns: 8 } });
-    toast(`ИИ ответил на ${r.turns} сообщений клиента (${r.tokens} ток.). Сравните с ответами менеджера.`);
+    toast(`${r.models.length > 1 ? r.models.length + ' модели ответили' : 'ИИ ответил'} на ${r.turns} сообщений клиента (${r.tokens} ток.${r.errors ? ', ошибок ' + r.errors : ''}). Сравните с ответами менеджера.`);
     loadChat(id);
   });
   busy($('#reviewChat'), async () => {
@@ -445,7 +449,7 @@ async function settingsSandbox(box) {
       <div class="sandbox">
         <div class="card">
           <div class="row" style="margin-bottom:12px"><h3 style="margin:0">Диалог с агентом</h3><span class="spacer"></span><button class="btn sm" id="sbClear">Начать заново</button></div>
-          <div class="messages" id="sbMsgs">${state.sandbox.map((m) => `<div class="msg ${m.direction} ${m.direction === 'out' ? 'bot' : ''}">${esc(m.text)}${m.note ? `<div class="meta">${esc(m.note)}</div>` : ''}</div>`).join('') || '<div class="empty">Напишите сообщение от лица покупателя — агент ответит по текущим правилам. В Авито ничего не отправляется.</div>'}</div>
+          <div class="messages" id="sbMsgs">${state.sandbox.map((m) => m.alt ? `<div class="draft"><div class="draft-head">вариант · ${esc(m.note)}</div><div class="draft-text">${esc(m.text)}</div></div>` : `<div class="msg ${m.direction} ${m.direction === 'out' ? 'bot' : ''}">${esc(m.text)}${m.note ? `<div class="meta">${esc(m.note)}</div>` : ''}</div>`).join('') || '<div class="empty">Напишите сообщение от лица покупателя — агент ответит по текущим правилам. В Авито ничего не отправляется.</div>'}</div>
           <div class="composer" style="padding:12px 0 0;background:none;border:0">
             <textarea id="sbText" rows="1" placeholder="Сообщение покупателя…"></textarea>
             <button class="btn primary" id="sbSend">Отправить</button>
@@ -459,10 +463,16 @@ async function settingsSandbox(box) {
             <label>Цена<input type="text" id="sbPrice" value="${esc(state.sandboxItem.price)}" placeholder="2 199 000 ₽"></label>
             <div class="field-help">Оставьте пустым, чтобы проверить личный чат без объявления.</div>
           </div>
+          <label style="flex-direction:row;align-items:center;margin-top:16px"><input type="checkbox" id="sbCompare" ${state.sbCompare ? 'checked' : ''}> Сравнить модели</label>
+          <input type="text" id="sbModels" value="${esc(state.sbModels || '')}" placeholder="gpt-4o-mini, gpt-4.1-mini, openrouter:…" style="margin-top:6px">
+          <div class="field-help">Ответы всех моделей появятся рядом; диалог продолжается с первым.</div>
           <details style="margin-top:16px"><summary class="muted small" style="cursor:pointer">Показать промпт последнего ответа</summary><pre class="prompt" id="sbPrompt">${esc(state.sandboxPrompt || '—')}</pre></details>
         </div>
       </div>`;
     const msgs = $('#sbMsgs'); msgs.scrollTop = msgs.scrollHeight;
+    $('#sbCompare').addEventListener('change', (e) => { state.sbCompare = e.target.checked; });
+    $('#sbModels').addEventListener('input', (e) => { state.sbModels = e.target.value; });
+    if (!state.sbModels) api('/api/runs?limit=1').then((d) => { if (!state.sbModels) { state.sbModels = (d.compareModels.length ? d.compareModels : [d.primaryModel]).join(', '); const el = $('#sbModels'); if (el) el.value = state.sbModels; } }).catch(() => {});
     $('#sbClear').addEventListener('click', () => { state.sandbox = []; render(); });
     ['sbTitle', 'sbPrice'].forEach((id) => $('#' + id).addEventListener('input', () => { state.sandboxItem = { ...state.sandboxItem, title: $('#sbTitle').value, price: $('#sbPrice').value }; }));
     $('#sbCar')?.addEventListener('change', (e) => {
@@ -477,10 +487,12 @@ async function settingsSandbox(box) {
       render();
       $('#sbSend').disabled = true;
       try {
-        const r = await api('/api/sandbox', { body: { history: state.sandbox, item: state.sandboxItem } });
-        const notes = [r.phone && `телефон: ${r.phone}`, r.handoff && 'передать менеджеру', r.skip && 'агент решил промолчать', r.usage && `${r.usage.total_tokens} ток.`].filter(Boolean).join(' · ');
+        const history = state.sandbox.filter((m) => !m.alt);
+        const r = await api('/api/sandbox', { body: { history, item: state.sandboxItem, models: state.sbCompare ? state.sbModels : undefined } });
+        const note = (x) => [x.model, x.phone && `телефон: ${x.phone}`, x.handoff && 'передать менеджеру', x.skip && 'агент решил промолчать', x.usage && `${x.usage.total_tokens} ток.`, x.ms && (x.ms / 1000).toFixed(1) + ' с'].filter(Boolean).join(' · ');
         state.sandboxPrompt = r.systemPrompt;
-        state.sandbox.push({ direction: 'out', text: r.reply || '(без ответа)', note: notes });
+        const variants = r.variants || [r];
+        variants.forEach((v, i) => state.sandbox.push({ direction: 'out', alt: i > 0 || Boolean(v.error), text: v.error ? '⚠ ' + v.error : v.reply || '(без ответа)', note: note(v) }));
       } catch (e) { toast(e.message, true); state.sandbox.pop(); }
       render();
       $('#sbText').focus();
@@ -513,9 +525,11 @@ async function settingsAvito(box, s) {
       </div>
     </div>
 
-    <div class="card"><h3>Ключ OpenAI</h3><div class="form">
+    <div class="card"><h3>Ключи ИИ</h3><div class="form">
       <label>API-ключ<input type="password" name="openai_api_key" value="${esc(s.openai_api_key)}" autocomplete="new-password" placeholder="sk-…"></label>
       <div class="field-help">Можно задать здесь или переменной окружения OPENAI_API_KEY на Railway.</div>
+      <label>Ключ OpenRouter (необязательно)<input type="password" name="openrouter_api_key" value="${esc(s.openrouter_api_key)}" autocomplete="new-password" placeholder="sk-or-…"></label>
+      <div class="field-help">Нужен, чтобы сравнивать модели других компаний: Claude, Gemini, DeepSeek, Llama. Один ключ на все, оплата по факту: openrouter.ai → Keys. В списке моделей пишется с приставкой, например <code>openrouter:anthropic/claude-sonnet-4.5</code>.</div>
       <div class="row"><button class="btn primary save2">Сохранить</button></div>
     </div></div>
 
@@ -526,7 +540,7 @@ async function settingsAvito(box, s) {
       <div class="row"><button class="btn primary save3">Сохранить</button><button class="btn" id="whOn" ${st.webhookUrl ? '' : 'disabled'}>Подключить вебхук</button><button class="btn" id="whOff" ${st.webhookUrl ? '' : 'disabled'}>Отключить вебхук</button></div>
     </div></div>`;
   bindSave(box, ['avito_client_id', 'avito_client_secret']);
-  bindSave(box, ['openai_api_key'], '.save2');
+  bindSave(box, ['openai_api_key', 'openrouter_api_key'], '.save2');
   bindSave(box, ['poll_interval_sec'], '.save3');
   const run = (sel, fn) => $(sel).addEventListener('click', async (e) => {
     const b = e.target; const txt = b.textContent; b.disabled = true; b.textContent = '…';
@@ -567,8 +581,9 @@ const KIND_LABEL = { shadow: 'ответ на живое сообщение', re
 function runBubble(r) {
   const cls = r.rating === 1 ? 'good' : r.rating === -1 ? 'bad' : '';
   const flags = [r.phone && `<span class="badge green">телефон ${esc(r.phone)}</span>`, r.handoff && '<span class="badge orange">передал бы менеджеру</span>', r.skip && '<span class="badge">промолчал бы</span>', r.comment && `<span class="badge">${esc(r.comment)}</span>`].filter(Boolean).join('');
-  return `<div class="draft ${cls}" data-run="${r.id}">
-    <div class="draft-head">🤖 ИИ ответил бы · ${KIND_LABEL[r.kind] || r.kind} · ${fmtTime(r.created)} ${flags}</div>
+  const err = r.comment?.startsWith('Ошибка');
+  return `<div class="draft ${cls} ${err ? 'bad' : ''}" data-run="${r.id}">
+    <div class="draft-head">🤖 <b>${esc(r.model || 'ИИ')}</b> · ${KIND_LABEL[r.kind] || r.kind} · ${fmtTime(r.created)}${r.ms ? ' · ' + (r.ms / 1000).toFixed(1) + ' с' : ''} ${flags}</div>
     <div class="draft-text">${esc(r.reply || '(без ответа)')}</div>
     ${r.correction ? `<div class="draft-fix">✍ Как надо: ${esc(r.correction)}</div>` : ''}
     <div class="draft-actions">
@@ -883,29 +898,49 @@ async function renderReview() {
         <label style="flex-direction:row;align-items:center"><input type="checkbox" id="rbSkip" checked> пропускать уже прогнанные</label>
         <button class="btn primary" id="rbStart">🧪 Прогнать</button>
       </div>
+      <label style="margin-top:12px">Модели — отвечают параллельно на каждое сообщение
+        <input type="text" id="rbModels" placeholder="gpt-4o-mini, gpt-4.1-mini, openrouter:anthropic/claude-sonnet-4.5">
+        <span class="field-help">Через запятую. Модели OpenAI — как есть (gpt-4o-mini, gpt-4.1, gpt-5-mini…); другие компании — через OpenRouter с приставкой <code>openrouter:</code>, ключ в Настройки → Авито. Пусто — только основная модель агента. Каждая модель тратит свои токены.</span></label>
       <div id="rbJob"></div>
     </div>
+    <div class="card" id="modelCard"></div>
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0">Ответы агента</h3><span class="spacer"></span><span class="small muted" id="runStats"></span></div>
       <div class="chips" style="margin-bottom:12px">${RUN_FILTERS.map(([k, l]) => `<button class="chip ${state.runFilter === k ? 'active' : ''}" data-rf="${k}">${l}</button>`).join('')}</div>
       <div id="runList">Загрузка…</div></div>`;
   const load = async () => {
-    const d = await api('/api/runs?limit=150&filter=' + state.runFilter);
+    const d = await api('/api/runs?limit=80&filter=' + state.runFilter);
     const s = d.stats;
+    if ($('#rbModels') && !$('#rbModels').dataset.init) { $('#rbModels').value = (d.compareModels.length ? d.compareModels : [d.primaryModel]).join(', '); $('#rbModels').dataset.init = '1'; }
+    $('#modelCard').innerHTML = d.models.length ? `<h3>Сравнение моделей</h3>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Модель</th><th>Ответов</th><th>👍</th><th>👎</th><th>Доля хороших</th><th>Ошибок</th><th>Токенов на ответ</th><th>Время ответа</th><th>Передал менеджеру</th></tr></thead><tbody>
+      ${d.models.map((m) => { const rated = (m.good || 0) + (m.bad || 0); return `<tr><td><b>${esc(m.model || '—')}</b></td><td>${m.total}</td><td>${m.good || 0}</td><td>${m.bad || 0}</td>
+        <td>${rated ? `<b>${Math.round(((m.good || 0) / rated) * 100)}%</b>` : '—'}</td><td>${m.errors || 0}</td><td>${m.avg_tokens ?? '—'}</td><td>${m.avg_ms ? (m.avg_ms / 1000).toFixed(1) + ' с' : '—'}</td><td>${m.handoffs || 0}</td></tr>`; }).join('')}
+      </tbody></table></div><div class="muted small" style="margin-top:8px">Оценивайте ответы 👍/👎 — таблица покажет, какая модель лучше. Время и токены помогают сравнить скорость и цену.</div>` : '';
     const rated = (s.good || 0) + (s.bad || 0);
     $('#runStats').textContent = `всего ${s.total || 0} · 👍 ${s.good || 0} · 👎 ${s.bad || 0} · не оценено ${s.unrated || 0}${rated ? ` · доля хороших ${Math.round(((s.good || 0) / rated) * 100)}%` : ''}${s.tokens ? ` · ${s.tokens} ток.` : ''}`;
     const box = $('#runList');
-    box.innerHTML = d.runs.map((r) => `
+    // одно сообщение клиента — ответы всех моделей рядом и ответ продавца
+    const groups = [];
+    const byKey = {};
+    for (const r of d.runs) {
+      const k = r.chat_id + '|' + r.at_message_id;
+      if (!byKey[k]) groups.push((byKey[k] = { first: r, runs: [] }));
+      byKey[k].runs.push(r);
+    }
+    box.innerHTML = groups.map(({ first: r, runs }) => `
       <div style="border-top:1px solid var(--border);padding:14px 0">
         <div class="row small"><b>${esc(r.client_name || 'Покупатель')}</b><span class="muted">${esc(r.item_title || 'личный чат')}${r.item_price ? ' · ' + esc(r.item_price) : ''}</span><span class="spacer"></span><a href="#/chats/${encodeURIComponent(r.chat_id)}">весь чат →</a></div>
         <div class="client-says" style="margin-top:8px"><span class="small muted">Клиент · ${fmtTime(r.at_created)}</span><br>${esc(r.client_text)}</div>
-        <div class="compare">${runBubble(r)}<div class="actual"><div class="draft-head">👤 Продавец ответил</div>${r.actual ? esc(r.actual) : '<span class="muted">не ответил</span>'}</div></div>
+        <div class="compare" style="grid-template-columns:repeat(${Math.min(runs.length + 1, 4)}, minmax(0, 1fr))">${runs.map(runBubble).join('')}<div class="actual"><div class="draft-head">👤 Продавец ответил</div>${r.actual ? esc(r.actual) : '<span class="muted">не ответил</span>'}</div></div>
       </div>`).join('') || '<div class="muted">Пока пусто. Загрузите историю в «Архиве» и запустите прогон.</div>';
     bindRuns(box, load);
   };
   $$('[data-rf]').forEach((b) => b.addEventListener('click', () => { state.runFilter = b.dataset.rf; $$('[data-rf]').forEach((x) => x.classList.toggle('active', x === b)); load(); }));
   $('#rbStart').addEventListener('click', async () => {
     try {
-      await api('/api/replay-batch', { body: { count: Number($('#rbCount').value), maxTurns: Number($('#rbTurns').value), order: $('#rbOrder').value, onlyLeads: $('#rbLeads').checked, skipDone: $('#rbSkip').checked } });
+      const models = $('#rbModels').value.trim();
+      await api('/api/settings', { body: { compare_models: models } }); // запоминаем выбор: им же пользуется кнопка «Прогнать ИИ» в чате
+      await api('/api/replay-batch', { body: { count: Number($('#rbCount').value), maxTurns: Number($('#rbTurns').value), order: $('#rbOrder').value, onlyLeads: $('#rbLeads').checked, skipDone: $('#rbSkip').checked, models } });
       toast('Прогон запущен');
     } catch (e) { toast(e.message, true); }
   });

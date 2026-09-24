@@ -192,6 +192,8 @@ const DEFAULTS = {
   feed_url: '',               // XML-фид автозагрузки с автомобилями
   kb_budget_chars: '16000',   // сколько символов базы знаний класть в промпт
   analysis_model: '',         // модель для разбора чатов (пусто — как у агента)
+  compare_models: '',         // модели для сравнения при прогоне: через запятую; openrouter:… — через OpenRouter
+  openrouter_api_key: '',
 };
 
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
@@ -226,7 +228,7 @@ function logEvent(type, text, chatId = null, level = 'info') {
 }
 
 // миграции для баз, созданных до появления колонок
-for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0']]) {
+for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0'], ['agent_runs', 'ms', 'INTEGER']]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
 }

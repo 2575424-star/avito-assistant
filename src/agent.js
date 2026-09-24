@@ -3,6 +3,13 @@ const { getSetting } = require('./db');
 const knowledge = require('./knowledge');
 
 const OPENAI_BASE = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+const OPENROUTER_BASE = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+
+/** Модели для сравнения: из настройки compare_models (через запятую или с новой строки). */
+function compareModels() {
+  const list = String(getSetting('compare_models') || '').split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+  return [...new Set(list)];
+}
 
 // ---------- Телефоны ----------
 const PHONE_RE = /(?:\+?\s*[78])?[\s\-–(]*\d{3}[\s\-–)]*\d{3}[\s\-–]*\d{2}[\s\-–]*\d{2}/g;
@@ -87,24 +94,38 @@ function historyToMessages(history) {
   return out.slice(-40);
 }
 
+/**
+ * Вызов LLM. Модель «gpt-4o-mini» — OpenAI; «openrouter:anthropic/claude-…» — OpenRouter
+ * (один ключ даёт Claude, Gemini, DeepSeek, Llama и др., API совместим с OpenAI).
+ */
 async function callOpenAI(messages, opts = {}) {
-  const key = getSetting('openai_api_key');
-  if (!key) throw new Error('Не задан ключ OpenAI (OPENAI_API_KEY)');
-  const model = opts.model || getSetting('openai_model') || 'gpt-4o-mini';
+  const label = opts.model || getSetting('openai_model') || 'gpt-4o-mini';
+  const viaRouter = label.startsWith('openrouter:');
+  const model = viaRouter ? label.slice('openrouter:'.length) : label;
+  const key = viaRouter ? getSetting('openrouter_api_key') : getSetting('openai_api_key');
+  const provider = viaRouter ? 'OpenRouter' : 'OpenAI';
+  if (!key) throw new Error(viaRouter ? 'Не задан ключ OpenRouter (Настройки → Авито → Ключи ИИ)' : 'Не задан ключ OpenAI (OPENAI_API_KEY)');
   const temperature = opts.temperature ?? Number(getSetting('temperature') || 0.5);
   const body = { model, messages, response_format: { type: 'json_object' } };
   // у reasoning-моделей (o*, gpt-5*) temperature не настраивается
-  if (!/^(o\d|gpt-5)/.test(model)) body.temperature = temperature;
+  if (!/^(openai\/)?(o\d|gpt-5)/.test(model)) body.temperature = temperature;
 
-  const res = await fetch(OPENAI_BASE + '/chat/completions', {
+  const post = () => fetch((viaRouter ? OPENROUTER_BASE : OPENAI_BASE) + '/chat/completions', {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', ...(viaRouter ? { 'X-Title': 'Avito Assistant' } : {}) },
     body: JSON.stringify(body),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error('OpenAI: ' + (data.error?.message || res.status));
+  let res = await post();
+  let data = await res.json().catch(() => ({}));
+  // не все модели поддерживают JSON-режим — повторяем без него, ответ разберём сами
+  if (!res.ok && res.status === 400 && /response_format|json/i.test(JSON.stringify(data.error || ''))) {
+    delete body.response_format;
+    res = await post();
+    data = await res.json().catch(() => ({}));
+  }
+  if (!res.ok) throw new Error(`${provider} (${model}): ` + (data.error?.message || res.status));
   const content = data.choices?.[0]?.message?.content || '';
-  return { content, usage: data.usage, model: data.model || model };
+  return { content, usage: data.usage, model: label };
 }
 
 function parseAgentJson(content) {
@@ -128,20 +149,22 @@ function parseAgentJson(content) {
  * Сгенерировать ответ.
  * @param {object} ctx {item:{title,price,url,closed}, phone, history:[...]}
  */
-async function generateReply(ctx) {
+async function generateReply(ctx, opts = {}) {
   const alreadyGreeted = (ctx.history || []).some((m) => m.direction === 'out' && /здравствуйте|добрый (день|вечер)|привет/i.test(m.text || ''));
   // последние сообщения клиента — по ним ищем нужные записи в базе знаний
   const queryText = (ctx.history || []).filter((m) => m.direction === 'in' && m.source !== 'system').slice(-3).map((m) => m.text).join('\n');
   const system = buildSystemPrompt({ ...ctx, alreadyGreeted, queryText });
   const messages = [{ role: 'system', content: system }, ...historyToMessages(ctx.history || [])];
-  const { content, usage, model } = await callOpenAI(messages);
+  const started = Date.now();
+  const { content, usage, model } = await callOpenAI(messages, { model: opts.model });
+  const ms = Date.now() - started;
   const parsed = parseAgentJson(content);
   // телефон из сообщений клиента надёжнее, чем из ответа модели
   const clientText = (ctx.history || []).filter((m) => m.direction === 'in' && m.type !== 'system').map((m) => m.text).join('\n');
   const digits = clientText.replace(/\D/g, '');
   const modelPhoneOk = parsed.phone && digits.includes(parsed.phone.slice(2)); // модель не должна выдумать номер
   const phone = extractPhone(clientText) || (modelPhoneOk ? parsed.phone : null);
-  return { ...parsed, phone, usage, model, systemPrompt: system };
+  return { ...parsed, phone, usage, model, ms, systemPrompt: system };
 }
 
 // ---------- Разбор переписок менеджеров ----------
@@ -216,4 +239,4 @@ FAQ: ${(x.faq || []).map((f) => f.q + ' → ' + f.a).join(' | ')}`;
   return { result: obj, usage, model };
 }
 
-module.exports = { generateReply, extractPhone, normalizePhone, buildSystemPrompt, analyzeChat, summarizeReviews, transcript };
+module.exports = { compareModels, generateReply, extractPhone, normalizePhone, buildSystemPrompt, analyzeChat, summarizeReviews, transcript };

@@ -102,6 +102,10 @@ const server = http.createServer(async (req, res) => {
   if (p === '/v1/chat/completions') {
     counters.openai++;
     const b = JSON.parse(raw || '{}');
+    if (b.model === 'bad-model') return json(res, 404, { error: { message: 'model not found' } });
+    // модель без JSON-режима: 400 на response_format, без него — отвечает
+    if (b.model === 'vendor/no-json' && b.response_format) return json(res, 400, { error: { message: 'response_format is not supported' } });
+    if (b.model === 'vendor/no-json') return json(res, 200, { choices: [{ message: { content: 'Вот ответ: ' + JSON.stringify({ reply: 'Ответ без JSON-режима', phone: null, handoff: false, skip: false }) } }], usage: { total_tokens: 900 } });
     return json(res, 200, { model: b.model, choices: [{ message: { content: JSON.stringify(openaiReply(b.messages || [])) } }], usage: { total_tokens: 1234 } });
   }
 
