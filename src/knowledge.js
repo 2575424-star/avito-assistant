@@ -82,6 +82,41 @@ const SKIP_PARAMS = new Set(['Id', 'AvitoId', 'Images', 'Videos', 'VideoURL', 'C
   'DateBegin', 'DateEnd', 'ListingFee', 'AdStatus', 'AvitoDateEnd', 'Description', 'Title', 'Price', 'Address', 'Category', 'VIN',
   'Year', 'Kilometrage', 'Latitude', 'Longitude', 'CompanyName', 'EMail', 'InternetCalls', 'CallsDevices']);
 
+// ---------- Наличие: в наличии / в пути / под заказ ----------
+const AVAIL_RU = { in_stock: 'в наличии', in_transit: 'в пути', on_order: 'под заказ' };
+const AVAIL_FIELDS = ['Availability', 'InStock', 'Stock', 'StockStatus', 'CarStatus', 'Status', 'Наличие'];
+
+function availFromValue(v) {
+  const s = String(v || '').toLowerCase();
+  if (!s) return null;
+  if (/пути|transit|поступ|ожида/.test(s)) return 'in_transit';
+  if (/заказ|order|предзаказ/.test(s)) return 'on_order';
+  if (/налич|stock|^(true|да|1|yes)$/.test(s)) return 'in_stock';
+  return null;
+}
+
+/** Наличие по данным фида: сначала явное поле, потом описание. Возвращает {value, src}. */
+function detectAvailability(fields, description = '') {
+  for (const f of AVAIL_FIELDS) {
+    const v = availFromValue(fields[f]);
+    if (v) return { value: v, src: 'поле фида ' + f };
+  }
+  const d = String(description || '').toLowerCase();
+  if (/(автомобиль|машина|авто)?\s*(находится\s+)?в\s+пути|ожидается\s+поступлени|поступление\s+(в|на|через|ожида)|под\s+заказ/.test(d)) {
+    return { value: /под\s+заказ/.test(d) && !/в\s+пути/.test(d) ? 'on_order' : 'in_transit', src: 'описание' };
+  }
+  if (/в\s+наличии/.test(d)) return { value: 'in_stock', src: 'описание' };
+  return { value: null, src: null };
+}
+
+const effAvail = (it) => it.availability_manual || it.availability || null;
+
+const AVAIL_PROMPT = {
+  in_stock: 'В НАЛИЧИИ — автомобиль в салоне, можно приехать посмотреть и оформить.',
+  in_transit: 'В ПУТИ — автомобиля ещё нет в салоне, он едет к нам. Не говори «в наличии»: скажи, что машина в пути, её можно забронировать, точную дату поступления уточнит менеджер.',
+  on_order: 'ПОД ЗАКАЗ — автомобиля нет в салоне, его привозят под клиента. Сроки и условия заказа уточнит менеджер.',
+};
+
 const PARAM_RU = {
   Make: 'Марка', Model: 'Модель', Modification: 'Модификация', Generation: 'Поколение', BodyType: 'Кузов', Doors: 'Дверей',
   Color: 'Цвет', FuelType: 'Двигатель', EngineSize: 'Объём', Power: 'Мощность, л.с.', Transmission: 'Коробка', DriveType: 'Привод',
@@ -92,6 +127,8 @@ const PARAM_RU = {
 function itemCard(it) {
   if (!it) return '';
   const lines = [`Название: ${it.title || ''}`];
+  const av = effAvail(it);
+  lines.push(`НАЛИЧИЕ: ${av ? AVAIL_PROMPT[av] : 'не указано — не утверждай, что машина в наличии; скажи, что наличие уточнит менеджер.'}`);
   if (it.price) lines.push(`Цена: ${fmtPrice(it.price)}`);
   if (it.status && it.status !== 'active') lines.push(`Статус: ${STATUS_RU[it.status] || it.status}`);
   if (it.year) lines.push(`Год: ${it.year}`);
@@ -100,7 +137,7 @@ function itemCard(it) {
   let params = {};
   try { params = JSON.parse(it.params || '{}'); } catch { /* ignore */ }
   for (const [k, v] of Object.entries(params)) {
-    if (SKIP_PARAMS.has(k) || !v || String(v).length > 400) continue;
+    if (SKIP_PARAMS.has(k) || AVAIL_FIELDS.includes(k) || !v || String(v).length > 400) continue;
     lines.push(`${PARAM_RU[k] || k}: ${v}`);
   }
   if (it.address) lines.push(`Адрес: ${it.address}`);
@@ -116,13 +153,22 @@ function getItem(avitoId) {
 
 /** Короткий список других машин в продаже — чтобы агент мог предложить альтернативу. */
 function stockList(excludeKey, limit = 60) {
-  const rows = db.prepare("SELECT * FROM items WHERE (status = 'active' OR status IS NULL) AND key != ? ORDER BY price LIMIT ?").all(excludeKey || '', limit);
-  return rows.map((r) => `— ${r.title}${r.price ? ', ' + fmtPrice(r.price) : ''}${r.year && !String(r.title).includes(r.year) ? ', ' + r.year : ''}`).join('\n');
+  // сначала машины в наличии, потом в пути
+  const rows = db.prepare(`SELECT * FROM items WHERE (status = 'active' OR status IS NULL) AND key != ?
+    ORDER BY CASE COALESCE(availability_manual, availability) WHEN 'in_stock' THEN 0 WHEN 'in_transit' THEN 1 ELSE 2 END, price LIMIT ?`).all(excludeKey || '', limit);
+  return rows.map((r) => {
+    const av = effAvail(r);
+    return `— ${r.title}${r.price ? ', ' + fmtPrice(r.price) : ''}${r.year && !String(r.title).includes(r.year) ? ', ' + r.year : ''}${av ? ' — ' + AVAIL_RU[av] : ''}`;
+  }).join('\n');
 }
 
 function itemsStats() {
   return db.prepare(`SELECT COUNT(*) total, SUM(status = 'active') active, SUM(description IS NOT NULL AND description != '') with_desc,
-    SUM(source LIKE '%feed%') from_feed FROM items`).get();
+    SUM(source LIKE '%feed%') from_feed,
+    SUM(COALESCE(availability_manual, availability) = 'in_stock') in_stock,
+    SUM(COALESCE(availability_manual, availability) = 'in_transit') in_transit,
+    SUM(COALESCE(availability_manual, availability) = 'on_order') on_order,
+    SUM(status = 'active' AND COALESCE(availability_manual, availability) IS NULL) unknown FROM items`).get();
 }
 
 const upsertItem = db.prepare(`
@@ -249,22 +295,26 @@ async function importFeed(url) {
         mapped++;
       }
       const price = Number(String(a.Price || '').replace(/\D/g, '')) || null;
+      const description = a.Description ? htmlToText(a.Description) : null;
+      const av = detectAvailability(a, description);
       upsertItem.run({
         ...EMPTY_ITEM,
         key: avitoId ? String(avitoId) : 'feed:' + a.Id,
         avito_id: avitoId, ad_id: a.Id, title: feedTitle(a), price,
         address: a.Address || null, category: a.Category || null, vin: a.VIN || null, year: a.Year || null,
-        mileage: a.Kilometrage || null, description: a.Description ? htmlToText(a.Description) : null,
+        mileage: a.Kilometrage || null, description,
         params: JSON.stringify(a), source: 'feed', updated: now(),
       });
+      db.prepare('UPDATE items SET availability = ?, availability_src = ? WHERE key = ?').run(av.value, av.src, avitoId ? String(avitoId) : 'feed:' + a.Id);
     }
     total += ads.length;
   }
-  logEvent('kb', `Фид загружен: объявлений ${total}, сопоставлено с Авито ${mapped}`);
-  return { count: total, mapped, url: urls.join(', ') };
+  const st = itemsStats();
+  logEvent('kb', `Фид загружен: объявлений ${total}, сопоставлено с Авито ${mapped}; в наличии ${st.in_stock || 0}, в пути ${st.in_transit || 0}, под заказ ${st.on_order || 0}`);
+  return { count: total, mapped, url: urls.join(', '), ...st };
 }
 
 module.exports = {
-  KB_CATEGORIES, selectKb, kbPromptSections, itemCard, getItem, stockList, itemsStats,
+  AVAIL_RU, detectAvailability, KB_CATEGORIES, selectKb, kbPromptSections, itemCard, getItem, stockList, itemsStats,
   importItemsFromApi, importFeed, parseFeed, htmlToText, fetchFeedUrl, fmtPrice,
 };

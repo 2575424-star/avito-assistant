@@ -847,9 +847,15 @@ async function kbEntries(box) {
 
 const ITEM_STATUS = { active: 'в продаже', old: 'снято', removed: 'удалено', blocked: 'заблокировано', rejected: 'отклонено' };
 
+const AVAIL = { in_stock: ['green', 'в наличии'], in_transit: ['blue', 'в пути'], on_order: ['orange', 'под заказ'] };
+const AVAIL_FILTERS = [['', 'Все'], ['in_stock', 'В наличии'], ['in_transit', 'В пути'], ['on_order', 'Под заказ'], ['unknown', 'Не указано']];
+
 async function kbCars(box, query = '') {
   const d = await api('/api/items?q=' + encodeURIComponent(query));
   const st = d.stats || {};
+  const eff = (it) => it.availability_manual || it.availability || null;
+  const af = state.availFilter || '';
+  d.items = d.items.filter((it) => !af || (af === 'unknown' ? !eff(it) && it.status === 'active' : eff(it) === af));
   box.innerHTML = `
     <div class="card"><h3>Откуда берутся автомобили</h3>
       <div class="muted small">Из Авито API приходят название, цена, статус и ссылка. Полное описание, комплектация, VIN и пробег есть только в XML-фиде автозагрузки — его адрес можно взять из профиля автозагрузки Авито автоматически. Агент видит карточку машины, по которой пишет клиент, и короткий список остальных машин в продаже.</div>
@@ -857,29 +863,50 @@ async function kbCars(box, query = '') {
       <div class="row" style="margin-top:12px"><input type="text" id="feedUrl" value="${esc(d.feedUrl || '')}" placeholder="URL XML-фида (пусто — взять из профиля автозагрузки Авито)" style="flex:1;min-width:260px"><button class="btn" id="itFeed">⬇ Загрузить фид</button></div>
       <div class="muted small" style="margin-top:10px">В базе: ${st.total || 0} · в продаже ${st.active || 0} · с описанием ${st.with_desc || 0} · из фида ${st.from_feed || 0}</div>
     </div>
+    <div class="card"><h3>Наличие: в наличии или в пути</h3>
+      <div class="muted small">Агент отвечает клиенту строго по этой отметке. Она берётся из фида (поле наличия или описание), её можно поправить вручную — ручная отметка сохраняется при перезагрузке фида. Если наличие не указано, агент не обещает, что машина есть, и говорит, что менеджер уточнит.</div>
+      <div class="row" style="margin-top:10px">
+        <span class="badge green">в наличии: ${st.in_stock || 0}</span><span class="badge blue">в пути: ${st.in_transit || 0}</span><span class="badge orange">под заказ: ${st.on_order || 0}</span>
+        <span class="badge ${st.unknown ? 'red' : ''}">в продаже без отметки: ${st.unknown || 0}</span>
+        ${st.unknown ? `<span class="spacer"></span><span class="small muted">Всем без отметки:</span><button class="btn sm" data-bulk="in_stock">в наличии</button><button class="btn sm" data-bulk="in_transit">в пути</button>` : ''}
+      </div>
+    </div>
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0">Автомобили</h3><span class="spacer"></span><input type="search" id="itQ" placeholder="Название, VIN, ID" value="${esc(query)}" style="max-width:260px"></div>
-      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Автомобиль</th><th>Цена</th><th>Статус</th><th>VIN / пробег</th><th>Описание</th><th>Чатов</th><th></th></tr></thead><tbody>
+      <div class="chips" style="margin-bottom:10px">${AVAIL_FILTERS.map(([k, l]) => `<button class="chip ${af === k ? 'active' : ''}" data-af="${k}">${l}</button>`).join('')}</div>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Автомобиль</th><th>Цена</th><th>Статус</th><th>Наличие</th><th>VIN / пробег</th><th>Описание</th><th>Чатов</th><th></th></tr></thead><tbody>
       ${d.items.map((it) => `<tr data-key="${esc(it.key)}"><td><b>${esc(it.title)}</b><div class="small muted">${it.avito_id ? 'ID ' + it.avito_id : 'только в фиде'}${it.ad_id ? ' · фид ' + esc(it.ad_id) : ''}</div></td>
         <td>${it.price ? Number(it.price).toLocaleString('ru-RU') + ' ₽' : '—'}</td>
         <td><span class="badge ${it.status === 'active' ? 'green' : ''}">${esc(ITEM_STATUS[it.status] || it.status || 'из фида')}</span></td>
+        <td><select data-avail="${esc(it.key)}" style="width:auto;padding:6px 8px">${[['', '— не указано —'], ['in_stock', 'в наличии'], ['in_transit', 'в пути'], ['on_order', 'под заказ']].map(([v, l]) => `<option value="${v}" ${(eff(it) || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <div class="small muted">${it.availability_manual ? 'вручную' : it.availability_src ? esc(it.availability_src) : ''}</div></td>
         <td class="small">${esc(it.vin || '—')}${it.mileage ? '<br>' + esc(it.mileage) + ' км' : ''}</td>
         <td>${it.desc_len ? `<span class="badge green">есть</span>` : '<span class="badge">нет</span>'}</td>
         <td>${it.chats || 0}</td>
-        <td style="white-space:nowrap"><button class="btn sm" data-card="${esc(it.key)}">Как видит агент</button> ${it.url ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(it.url)}">↗</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">Автомобилей пока нет — загрузите объявления или фид.</td></tr>'}
+        <td style="white-space:nowrap"><button class="btn sm" data-card="${esc(it.key)}">Как видит агент</button> ${it.url ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(it.url)}">↗</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">Автомобилей пока нет — загрузите объявления или фид.</td></tr>'}
       </tbody></table></div></div>`;
+  $$('[data-af]', box).forEach((b) => b.addEventListener('click', () => { state.availFilter = b.dataset.af; kbCars(box, query); }));
+  $$('[data-avail]', box).forEach((sel) => sel.addEventListener('change', async () => {
+    await api('/api/items/availability', { body: { keys: [sel.dataset.avail], value: sel.value || null } });
+    toast('Наличие сохранено'); kbCars(box, query);
+  }));
+  $$('[data-bulk]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`Отметить «${b.textContent}» все машины в продаже без отметки (${st.unknown})?`)) return;
+    const r = await api('/api/items/availability', { body: { onlyUnknown: true, value: b.dataset.bulk } });
+    toast('Отмечено: ' + r.changed); kbCars(box, query);
+  }));
   const run = (sel, fn) => $(sel).addEventListener('click', async (e) => {
     const b = e.target; const t = b.textContent; b.disabled = true; b.textContent = '…';
     try { await fn(); } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = t; }
   });
   run('#itApi', async () => { const r = await api('/api/items/import-api', { body: {} }); toast(`Загружено объявлений: ${r.count}`); kbCars(box); });
-  run('#itFeed', async () => { const r = await api('/api/items/import-feed', { body: { url: $('#feedUrl').value.trim() } }); toast(`Фид: ${r.count} объявлений, сопоставлено с Авито ${r.mapped}`); kbCars(box); });
+  run('#itFeed', async () => { const r = await api('/api/items/import-feed', { body: { url: $('#feedUrl').value.trim() } }); toast(`Фид: ${r.count} объявлений, сопоставлено с Авито ${r.mapped}; в наличии ${r.in_stock || 0}, в пути ${r.in_transit || 0}`); kbCars(box); });
   let t;
   $('#itQ').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => kbCars(box, e.target.value).then(() => { const q = $('#itQ'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }), 350); });
   $$('[data-card]', box).forEach((b) => b.addEventListener('click', async () => {
     const tr = b.closest('tr');
     if (tr.nextElementSibling?.classList.contains('expand')) return tr.nextElementSibling.remove();
     const r = await api('/api/items/' + encodeURIComponent(b.dataset.card));
-    tr.insertAdjacentHTML('afterend', `<tr class="expand"><td colspan="7"><pre class="prompt">${esc(r.card)}</pre></td></tr>`);
+    tr.insertAdjacentHTML('afterend', `<tr class="expand"><td colspan="8"><pre class="prompt">${esc(r.card)}</pre></td></tr>`);
   }));
 }
 

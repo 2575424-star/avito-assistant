@@ -71,6 +71,7 @@ function importHistory({ maxChats = 100000 } = {}) {
         logEvent('import', `Чат не загружен: ${e.message}`, c.id, 'error');
       }
       job.done++;
+      if (job.done % 200 === 0) logEvent('import', `Загрузка истории: чатов ${job.done}, новых сообщений ${job.messages}, ошибок ${job.errors}`);
       await sleep(150);
     };
 
@@ -99,19 +100,40 @@ function importHistory({ maxChats = 100000 } = {}) {
       logEvent('import', `Список чатов оборвался на ${offset}: ${listError}. Добираю по объявлениям.`, null, 'warn');
       const items = db.prepare('SELECT avito_id FROM items WHERE avito_id IS NOT NULL').all().map((r) => r.avito_id);
       if (!items.length) job.note = 'Список чатов оборвался. Загрузите объявления (База знаний → Автомобили) и запустите ещё раз — остальные чаты доберутся по объявлениям.';
-      for (let i = 0; i < items.length && !job.stop; i += 20) {
-        const ids = items.slice(i, i + 20).join(',');
+      const before = seen.size;
+      let fallbackErrors = 0;
+      // все чаты по списку объявлений; offset по одному объявлению тоже может упереться в предел — идём, пока отдаёт
+      const byItems = async (ids) => {
         for (let off = 0; !job.stop; off += 100) {
-          let chats;
-          try { chats = await avito.getChats({ limit: 100, offset: off, chatTypes: 'u2i', itemIds: ids }); } catch { break; }
+          const chats = await avito.getChats({ limit: 100, offset: off, chatTypes: 'u2i', itemIds: ids });
           for (const c of chats) await handle(c);
           if (chats.length < 100) break;
         }
-        job.note = `Добор по объявлениям: ${Math.min(i + 20, items.length)} из ${items.length}`;
+      };
+      for (let i = 0; i < items.length && !job.stop; i += 20) {
+        const batch = items.slice(i, i + 20);
+        try {
+          await byItems(batch.join(','));
+        } catch (e) {
+          // пачкой не вышло — по одному объявлению
+          for (const id of batch) {
+            if (job.stop) break;
+            try { await byItems(String(id)); } catch (e2) {
+              fallbackErrors++;
+              if (fallbackErrors <= 3) logEvent('import', `Чаты по объявлению ${id} не получены: ${e2.message}`, null, 'warn');
+            }
+          }
+        }
+        job.note = `Добор по объявлениям: ${Math.min(i + 20, items.length)} из ${items.length}, найдено ещё ${seen.size - before} чатов`;
       }
+      logEvent('import', `Добор по объявлениям: объявлений ${items.length}, найдено ещё чатов ${seen.size - before}, ошибок ${fallbackErrors}`);
     }
     if (!job.note.startsWith('Список чатов оборвался')) job.note = job.stop ? 'Остановлено' : 'Готово';
-    logEvent('import', `История загружена: чатов ${job.done} (без изменений ${job.skipped}), новых сообщений ${job.messages}, ошибок ${job.errors}`);
+    const db1 = (sql) => db.prepare(sql).get().n;
+    logEvent('import', `История загружена: чатов ${job.done} (без изменений ${job.skipped}), новых сообщений ${job.messages}, ошибок ${job.errors}. `
+      + `В базе: чатов ${db1('SELECT COUNT(*) n FROM chats')}, сообщений ${db1('SELECT COUNT(*) n FROM messages')}, `
+      + `чатов без сообщений ${db1('SELECT COUNT(*) n FROM chats c WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)')}, `
+      + `с ответом продавца ${db1("SELECT COUNT(DISTINCT chat_id) n FROM messages WHERE direction = 'out' AND source != 'system'")}`);
     return { chats: job.done, messages: job.messages, errors: job.errors };
   });
 }

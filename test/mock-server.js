@@ -21,7 +21,7 @@ const FEED = `<?xml version="1.0" encoding="utf-8"?>
     <Description><![CDATA[<p>Новый Haval Jolion в наличии.</p><ul><li>Кредит от 4,9%</li><li>Трейд-ин</li></ul>]]></Description>
     <Images><Image url="https://img/1.jpg"/></Images></Ad>
   <Ad><Id>A-2</Id><Category>Автомобили</Category><Make>Chery</Make><Model>Tiggo 7 Pro Max</Model><Year>2025</Year><Kilometrage>0</Kilometrage>
-    <Price>2890000</Price><VIN>LVVDB21B0RD000002</VIN><Description>Полный привод &amp; панорама</Description></Ad>
+    <Price>2890000</Price><Availability>В пути</Availability><VIN>LVVDB21B0RD000002</VIN><Description>Полный привод &amp; панорама</Description></Ad>
   <Ad><Id>A-3</Id><Category>Автомобили</Category><Make>Changan</Make><Model>CS55</Model><Year>2025</Year><Price>2500000</Price></Ad>
 </Ads>`;
 const FEED_MAP = { 'A-1': 9001, 'A-2': 9002 };
@@ -134,6 +134,8 @@ const server = http.createServer(async (req, res) => {
     const itemIds = url.searchParams.get('item_ids');
     let list = CHATS;
     if (itemIds) {
+      // как у настоящего Авито может быть: несколько ID через запятую не принимаются
+      if (itemIds.includes(',')) return json(res, 400, { error: { message: 'Bad Request' } });
       const set = new Set(itemIds.split(',').map(Number));
       list = CHATS.filter((c) => set.has(c.context.value.id));
     } else if (offset >= CHAT_LIST_CAP) {

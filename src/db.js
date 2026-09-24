@@ -228,7 +228,8 @@ function logEvent(type, text, chatId = null, level = 'info') {
 }
 
 // миграции для баз, созданных до появления колонок
-for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0'], ['agent_runs', 'ms', 'INTEGER']]) {
+for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0'], ['agent_runs', 'ms', 'INTEGER'],
+  ['items', 'availability', 'TEXT'], ['items', 'availability_src', 'TEXT'], ['items', 'availability_manual', 'TEXT']]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
 }
