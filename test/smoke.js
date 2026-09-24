@@ -251,7 +251,7 @@ async function step(name, fn) {
   await step('Лаборатория: 3 стратегии × 2 модели, отдельные ключи, расходы, изоляция', async () => {
     const cfg = (await api('/api/lab/config')).data;
     assert.deepEqual(cfg.strategies.map((x) => x.key), ['codex_business', 'codex_friendly', 'claude_independent'], 'ровно три активные стратегии');
-    assert.deepEqual(cfg.models.map((x) => x.model), ['gpt-6-sol', 'gpt-6-luna']);
+    assert.deepEqual(cfg.models.map((x) => x.model), ['gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini']);
     assert.equal(cfg.cases.filter((c) => c.set_name === 'standard').length, 12);
     assert.equal(cfg.cases.filter((c) => c.set_name === 'faq').length, 20);
     const [sol, luna] = cfg.models;

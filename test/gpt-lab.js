@@ -28,14 +28,18 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
     }
     assert.throws(()=>gpt.start({caseIds:['STD01']}),/контрольных/);
     const before={};for(const t of ['chats','messages','kb'])before[t]=db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n;
-    const job=gpt.start({caseIds:['GPT01','GPT10']});
+    const job=gpt.start({caseIds:['GPT01','GPT10'],models:['gpt-6-luna','gpt-4o-mini']});
     assert.throws(()=>gpt.start({caseIds:['GPT01']}),/выполняется/);
     while(job.running)await sleep();
     assert.equal(job.error,undefined);assert.equal(job.done,8);
     const result=gpt.results(job.batch);
     assert.equal(result.runs.length,8);
     assert.equal(calls.length,16,'4 one-turn plus 4 three-turn conversations');
-    assert.deepEqual(new Set(calls.map(p=>p.profile.api_key)),new Set(['sk-fake-0','sk-fake-1']));
+    assert.deepEqual(new Set(calls.map(p=>p.profile.api_key)),new Set(['sk-fake-1','sk-fake-2']));
+    assert.deepEqual(new Set(calls.map(p=>p.model)),new Set(['gpt-6-luna','gpt-4o-mini']));
+    for(const p of calls) {assert.equal(p.reasoning_effort,p.model==='gpt-6-luna'?'none':null);assert.equal(p.max_output_tokens,600);assert.ok(p.system.length<5000);}
+    assert.ok(result.runs.every(r=>r.version==='egor-2'));
+    assert.throws(()=>gpt.start({caseIds:['GPT01'],models:['gpt-6-sol']}),/Выберите Luna/);
     for(const r of result.runs.filter(r=>r.case_id==='GPT10'))assert.equal(r.turns.length,3);
     assert.doesNotMatch(JSON.stringify(gpt.config()),/sk-fake/);
     assert.doesNotMatch(JSON.stringify(result),/cost_usd|input_tokens|sk-fake/);
@@ -44,8 +48,14 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
     gpt.review(first.id,{correction:'Уточнить цену',comment:'Нужен прямой ответ',critical:true});
     assert.equal(gpt.results(job.batch).runs.find(r=>r.id===first.id).correction,'Уточнить цену');
     for(const t of Object.keys(before))assert.equal(db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n,before[t]);
+    const solo=gpt.start({caseIds:['GPT01']});while(solo.running)await sleep();
+    assert.equal(solo.done,2);assert.ok(gpt.results(solo.batch).runs.every(r=>r.model==='gpt-6-luna'));
+    // Existing Sol results remain visible with their original model and prompt version.
+    db.prepare("UPDATE lab_runs SET model='gpt-6-sol',version_id=(SELECT id FROM agent_versions WHERE key='gpt_egor_formal' AND version='egor-1') WHERE id=?").run(first.id);
+    assert.ok(gpt.results(job.batch).models.some(m=>m.model==='gpt-6-sol'));
+    assert.equal(gpt.results(job.batch).runs.find(r=>r.id===first.id).version,'egor-1');
     llm.call=async()=>{throw new Error('provider unavailable');};
-    const failed=gpt.start({caseIds:['GPT02']});while(failed.running)await sleep();
+    const failed=gpt.start({caseIds:['GPT02'],models:['gpt-6-luna','gpt-4o-mini']});while(failed.running)await sleep();
     assert.ok(failed.cost > 0, 'unknown failed usage reserves the estimated cost');
     for (const row of lab.runs({batch:failed.batch})) {assert.equal(row.usage_known,0);assert.equal(row.cost_usd,null);}
     assert.equal(failed.errors,4);assert.equal(gpt.results(failed.batch).runs.length,4);
