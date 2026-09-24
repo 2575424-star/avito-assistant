@@ -76,6 +76,20 @@ async function step(name, fn) {
     assert.match(card.data.card, /Климат-контроль, Камера заднего вида/);
     assert.equal(card.data.item.source, 'api+feed');
     assert.equal(card.data.item.title, 'Haval Jolion 1.5 AMT, 2025', 'фид не перетирает название из Авито');
+    assert.match(card.data.card, /НАЛИЧИЕ: В НАЛИЧИИ/, 'наличие из описания');
+    const card2 = await api('/api/items/9002');
+    assert.match(card2.data.card, /НАЛИЧИЕ: В ПУТИ/, 'наличие из поля фида');
+    assert.doesNotMatch(card2.data.card, /Наличие: В пути/, 'поле не дублируется');
+    const st = (await api('/api/items')).data.stats;
+    assert.equal(st.in_stock, 1);
+    assert.equal(st.in_transit, 1);
+    let r2 = await api('/api/items/availability', { keys: ['9002'], value: 'in_stock' });
+    assert.equal(r2.data.changed, 1);
+    assert.match((await api('/api/items/9002')).data.card, /НАЛИЧИЕ: В НАЛИЧИИ/, 'ручная отметка важнее фида');
+    await api('/api/items/import-feed', {});
+    assert.match((await api('/api/items/9002')).data.card, /НАЛИЧИЕ: В НАЛИЧИИ/, 'ручная отметка переживает перезагрузку фида');
+    await api('/api/items/availability', { keys: ['9002'], value: null });
+    assert.match((await api('/api/items/9002')).data.card, /НАЛИЧИЕ: В ПУТИ/);
   });
 
   await step('загрузка всей истории (с добором по объявлениям после ограничения списка)', async () => {

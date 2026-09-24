@@ -460,18 +460,31 @@ async function api(req, res, url) {
     let where = '';
     if (search) { where = 'WHERE title LIKE ? OR vin LIKE ? OR CAST(avito_id AS TEXT) LIKE ?'; args.push(`%${search}%`, `%${search}%`, `%${search}%`); }
     const rows = db.prepare(`SELECT key, avito_id, ad_id, title, price, url, status, vin, year, mileage, source, updated, length(description) desc_len,
+      availability, availability_src, availability_manual,
       (SELECT COUNT(*) FROM chats c WHERE c.item_id = items.avito_id) chats FROM items ${where} ORDER BY status = 'active' DESC, title LIMIT 500`).all(...args);
     return send(res, 200, { items: rows, stats: knowledge.itemsStats(), feedUrl: getSetting('feed_url') });
   }
   if (p === '/api/items/import-api' && m === 'POST') {
-    try { return send(res, 200, await knowledge.importItemsFromApi()); } catch (e) { return send(res, 400, { error: e.message }); }
+    try { return send(res, 200, await knowledge.importItemsFromApi()); } catch (e) { logEvent('kb', 'Объявления не загрузились: ' + e.message, null, 'error'); return send(res, 400, { error: e.message }); }
   }
   if (p === '/api/items/import-feed' && m === 'POST') {
     const b = await readBody(req);
     try {
       if (b.url !== undefined) setSetting('feed_url', b.url.trim());
       return send(res, 200, await knowledge.importFeed(b.url?.trim() || undefined));
-    } catch (e) { return send(res, 400, { error: e.message }); }
+    } catch (e) { logEvent('kb', 'Фид не загрузился: ' + e.message, null, 'error'); return send(res, 400, { error: e.message }); }
+  }
+  // ручная отметка наличия: {keys:[…] | onlyUnknown:true, value:'in_stock'|'in_transit'|'on_order'|null}
+  if (p === '/api/items/availability' && m === 'POST') {
+    const b = await readBody(req);
+    const value = ['in_stock', 'in_transit', 'on_order'].includes(b.value) ? b.value : null;
+    let n = 0;
+    if (b.onlyUnknown) {
+      n = Number(db.prepare("UPDATE items SET availability_manual = ? WHERE status = 'active' AND COALESCE(availability_manual, availability) IS NULL").run(value).changes);
+    } else {
+      for (const k of b.keys || []) n += Number(db.prepare('UPDATE items SET availability_manual = ? WHERE key = ?').run(value, String(k)).changes);
+    }
+    return send(res, 200, { ok: true, changed: n });
   }
   mm = p.match(/^\/api\/items\/([^/]+)$/);
   if (mm && m === 'GET') {
