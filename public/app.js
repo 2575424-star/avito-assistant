@@ -125,8 +125,9 @@ async function renderDashboard() {
     <div class="grid c3" style="margin-top:16px">
       <div class="card"><h3><span class="dot" style="background:var(--accent)"></span>ВХОДЯЩИЕ ЧАТЫ</h3><div class="stat-list">
         <div><span>Новых входящих чатов</span><b>${d.incoming}</b></div>
-        <div><span>Успешные</span><b>${d.leadsIn}</b></div>
-        <div><span>Конверсия</span><b>${d.conversion}%</b></div></div></div>
+        <div><span>Из них дали телефон за 7 дней</span><b>${d.cohort.leads7d} из ${d.cohort.cohortBase}</b></div>
+        <div><span>Конверсия (зрелые чаты)</span><b>${d.conversion}%</b></div>
+        <div><span>Ещё зреют (моложе 7 дней)</span><b>${d.cohort.immature}</b></div></div></div>
       <div class="card"><h3><span class="dot" style="background:var(--green)"></span>РАБОТА БОТА</h3><div class="stat-list">
         <div><span>Сообщений отправлено</span><b>${d.botMsgs}</b></div>
         <div><span>Чатов с ответом бота</span><b>${d.botChats}</b></div>
@@ -225,7 +226,7 @@ async function loadChat(id, silent) {
   const runsByMsg = {};
   for (const r of d.runs || []) {
     const byModel = (runsByMsg[r.at_message_id] ||= {});
-    byModel[r.model || ''] = r; // последний ответ каждой модели
+    byModel[(r.model || '') + '|' + (r.agent_version_id || '')] = r; // последний ответ каждой конфигурации
   }
   for (const k of Object.keys(runsByMsg)) runsByMsg[k] = Object.values(runsByMsg[k]);
   const box = $('.messages', pane);
@@ -280,7 +281,7 @@ async function loadChat(id, silent) {
   });
   busy($('#replayChat'), async () => {
     const r = await api(`/api/chats/${encodeURIComponent(id)}/replay`, { body: { maxTurns: 8 } });
-    toast(`${r.models.length > 1 ? r.models.length + ' модели ответили' : 'ИИ ответил'} на ${r.turns} сообщений клиента (${r.tokens} ток.${r.errors ? ', ошибок ' + r.errors : ''}). Сравните с ответами менеджера.`);
+    toast(`${r.configs.length > 1 ? r.configs.length + ' конфигурации ответили' : 'ИИ ответил'} на ${r.turns} сообщений клиента (${r.tokens} ток.${r.errors ? ', ошибок ' + r.errors : ''}). Сравните с ответами менеджера.`);
     loadChat(id);
   });
   busy($('#reviewChat'), async () => {
@@ -334,7 +335,7 @@ async function renderLeads() {
 }
 
 // ---------- settings ----------
-const SUBTABS = [['agent', 'Агент'], ['templates', 'Шаблоны'], ['sandbox', 'Тест агента'], ['avito', 'Авито'], ['notify', 'Уведомления'], ['log', 'Журнал']];
+const SUBTABS = [['agent', 'Агент'], ['strategies', 'Стратегии'], ['templates', 'Шаблоны'], ['sandbox', 'Тест агента'], ['avito', 'Авито'], ['notify', 'Уведомления'], ['log', 'Журнал']];
 
 async function renderSettings(parts) {
   const sub = SUBTABS.some(([k]) => k === parts[0]) ? parts[0] : 'agent';
@@ -342,7 +343,7 @@ async function renderSettings(parts) {
   view().innerHTML = head + '<div id="sub"></div>';
   const box = $('#sub');
   const s = await api('/api/settings');
-  ({ agent: settingsAgent, templates: settingsTemplates, sandbox: settingsSandbox, avito: settingsAvito, notify: settingsNotify, log: settingsLog })[sub](box, s);
+  ({ agent: settingsAgent, strategies: settingsStrategies, templates: settingsTemplates, sandbox: settingsSandbox, avito: settingsAvito, notify: settingsNotify, log: settingsLog })[sub](box, s);
 }
 
 function bindSave(box, keys, btnSel = '.save') {
@@ -358,6 +359,50 @@ function bindSave(box, keys, btnSel = '.save') {
 }
 
 const tog = (name, s, title, help) => `<div class="toggle-row"><label class="switch"><input type="checkbox" name="${name}" ${s[name] === '1' ? 'checked' : ''}><span></span></label><div><b>${title}</b><div class="muted small">${help}</div></div></div>`;
+
+async function settingsStrategies(box) {
+  const d = await api('/api/agent-versions');
+  box.innerHTML = `
+    <div class="notice info" style="margin-bottom:16px">Стратегия = общая инструкция + правило, когда и как предлагать следующий шаг. Версии не меняются: правка создаёт новую версию, поэтому результаты прогонов всегда относятся к конкретному тексту. Факты (карточка авто, база знаний, наличие, состояние оплаты чата) подставляются одинаково для всех.</div>
+    <div class="card"><h3>Черновики на живые сообщения</h3>
+      <label>Стратегия, которой агент пишет черновики (и ответы в боевом режиме)
+        <select id="liveVer"><option value="">Правила из вкладки «Агент»</option>${d.versions.filter((v) => v.status === 'active').map((v) => `<option value="${v.id}" ${d.liveVersionId === v.id ? 'selected' : ''}>${esc(v.key)} ${esc(v.version)} — ${esc(v.title || '')}</option>`).join('')}</select></label>
+    </div>
+    <div class="card"><h3>Версии</h3>
+      ${d.versions.map((v) => `<div class="kb-item ${v.status === 'archived' ? 'off' : ''}">
+        <div><b>${esc(v.key)} ${esc(v.version)}</b> <span class="muted">${esc(v.title || '')}</span> ${v.model ? `<span class="badge">${esc(v.model)}</span>` : ''} <span class="badge">${v.runs} ответов</span>
+          <details style="margin-top:6px"><summary class="small muted" style="cursor:pointer">Текст</summary><pre class="prompt">${esc(v.base_prompt)}\n\n${esc(v.strategy || '')}</pre></details></div>
+        <div class="row" style="align-items:flex-start;flex-wrap:nowrap"><button class="btn sm" data-copy="${v.id}">Новая версия на основе</button>
+          <button class="btn sm" data-arch="${v.id}" data-st="${v.status === 'archived' ? 'active' : 'archived'}">${v.status === 'archived' ? 'Вернуть' : 'В архив'}</button></div>
+      </div>`).join('')}
+    </div>
+    <div class="card" id="verForm"><h3>Новая версия</h3><div class="form">
+      <div class="grid c2">
+        <label>Ключ стратегии<input type="text" id="vKey" placeholder="A_direct"></label>
+        <label>Номер версии<input type="text" id="vVer" placeholder="v0.2.1"></label>
+        <label>Название<input type="text" id="vTitle"></label>
+        <label>Модель (необязательно)<input type="text" id="vModel" placeholder="выбирается при прогоне"></label>
+      </div>
+      <label>Общая инструкция<textarea id="vBase" rows="14"></textarea></label>
+      <label>Стратегия<textarea id="vStrat" rows="5"></textarea></label>
+      <div class="row"><button class="btn primary" id="vSave">Создать версию</button></div>
+    </div></div>`;
+  $('#liveVer').addEventListener('change', async (e) => { await api('/api/settings', { body: { live_agent_version_id: e.target.value } }); toast('Сохранено'); });
+  $$('[data-copy]', box).forEach((b) => b.addEventListener('click', () => {
+    const v = d.versions.find((x) => x.id === Number(b.dataset.copy));
+    $('#vKey').value = v.key; $('#vVer').value = ''; $('#vTitle').value = v.title || ''; $('#vModel').value = v.model || '';
+    $('#vBase').value = v.base_prompt; $('#vStrat').value = v.strategy || '';
+    $('#vVer').placeholder = v.version.replace(/(\d+)$/, (n) => Number(n) + 1);
+    $('#verForm').scrollIntoView({ behavior: 'smooth' }); $('#vVer').focus();
+  }));
+  $$('[data-arch]', box).forEach((b) => b.addEventListener('click', async () => { await api(`/api/agent-versions/${b.dataset.arch}/status`, { body: { status: b.dataset.st } }); settingsStrategies(box); }));
+  $('#vSave').addEventListener('click', async () => {
+    try {
+      await api('/api/agent-versions', { body: { key: $('#vKey').value, version: $('#vVer').value, title: $('#vTitle').value, model: $('#vModel').value, base_prompt: $('#vBase').value, strategy: $('#vStrat').value } });
+      toast('Версия создана'); settingsStrategies(box);
+    } catch (e) { toast(e.message, true); }
+  });
+}
 
 function settingsAgent(box, s) {
   box.innerHTML = `
@@ -444,6 +489,7 @@ async function settingsTemplates(box) {
 
 async function settingsSandbox(box) {
   const cars = (await api('/api/items').catch(() => ({ items: [] }))).items.filter((x) => x.avito_id);
+  const versions = (await api('/api/agent-versions').catch(() => ({ versions: [] }))).versions.filter((v) => v.status === 'active');
   const render = () => {
     box.innerHTML = `
       <div class="sandbox">
@@ -463,6 +509,7 @@ async function settingsSandbox(box) {
             <label>Цена<input type="text" id="sbPrice" value="${esc(state.sandboxItem.price)}" placeholder="2 199 000 ₽"></label>
             <div class="field-help">Оставьте пустым, чтобы проверить личный чат без объявления.</div>
           </div>
+          <label style="margin-top:16px">Стратегия<select id="sbVer"><option value="">Правила из вкладки «Агент»</option>${versions.map((v) => `<option value="${v.id}" ${String(state.sbVersion || '') === String(v.id) ? 'selected' : ''}>${esc(v.key)} ${esc(v.version)}</option>`).join('')}</select></label>
           <label style="flex-direction:row;align-items:center;margin-top:16px"><input type="checkbox" id="sbCompare" ${state.sbCompare ? 'checked' : ''}> Сравнить модели</label>
           <input type="text" id="sbModels" value="${esc(state.sbModels || '')}" placeholder="gpt-4o-mini, gpt-4.1-mini, openrouter:…" style="margin-top:6px">
           <div class="field-help">Ответы всех моделей появятся рядом; диалог продолжается с первым.</div>
@@ -471,6 +518,7 @@ async function settingsSandbox(box) {
       </div>`;
     const msgs = $('#sbMsgs'); msgs.scrollTop = msgs.scrollHeight;
     $('#sbCompare').addEventListener('change', (e) => { state.sbCompare = e.target.checked; });
+    $('#sbVer').addEventListener('change', (e) => { state.sbVersion = e.target.value; });
     $('#sbModels').addEventListener('input', (e) => { state.sbModels = e.target.value; });
     if (!state.sbModels) api('/api/runs?limit=1').then((d) => { if (!state.sbModels) { state.sbModels = (d.compareModels.length ? d.compareModels : [d.primaryModel]).join(', '); const el = $('#sbModels'); if (el) el.value = state.sbModels; } }).catch(() => {});
     $('#sbClear').addEventListener('click', () => { state.sandbox = []; render(); });
@@ -488,7 +536,7 @@ async function settingsSandbox(box) {
       $('#sbSend').disabled = true;
       try {
         const history = state.sandbox.filter((m) => !m.alt);
-        const r = await api('/api/sandbox', { body: { history, item: state.sandboxItem, models: state.sbCompare ? state.sbModels : undefined } });
+        const r = await api('/api/sandbox', { body: { history, item: state.sandboxItem, versionId: state.sbVersion || undefined, models: state.sbCompare ? state.sbModels : undefined } });
         const note = (x) => [x.model, x.phone && `телефон: ${x.phone}`, x.handoff && 'передать менеджеру', x.skip && 'агент решил промолчать', x.usage && `${x.usage.total_tokens} ток.`, x.ms && (x.ms / 1000).toFixed(1) + ' с'].filter(Boolean).join(' · ');
         state.sandboxPrompt = r.systemPrompt;
         const variants = r.variants || [r];
@@ -578,12 +626,14 @@ async function settingsLog(box) {
 // ---------- черновики ИИ (оценка и исправление) ----------
 const KIND_LABEL = { shadow: 'ответ на живое сообщение', replay: 'прогон по истории' };
 
+const cfgLabel = (r) => `${r.v_key ? r.v_key + ' ' + r.v_version : 'Настройки'} · ${r.model || 'ИИ'}`;
+
 function runBubble(r) {
   const cls = r.rating === 1 ? 'good' : r.rating === -1 ? 'bad' : '';
   const flags = [r.phone && `<span class="badge green">телефон ${esc(r.phone)}</span>`, r.handoff && '<span class="badge orange">передал бы менеджеру</span>', r.skip && '<span class="badge">промолчал бы</span>', r.comment && `<span class="badge">${esc(r.comment)}</span>`].filter(Boolean).join('');
   const err = r.comment?.startsWith('Ошибка');
   return `<div class="draft ${cls} ${err ? 'bad' : ''}" data-run="${r.id}">
-    <div class="draft-head">🤖 <b>${esc(r.model || 'ИИ')}</b> · ${KIND_LABEL[r.kind] || r.kind} · ${fmtTime(r.created)}${r.ms ? ' · ' + (r.ms / 1000).toFixed(1) + ' с' : ''} ${flags}</div>
+    <div class="draft-head">🤖 <b>${esc(cfgLabel(r))}</b> · ${KIND_LABEL[r.kind] || r.kind} · ${fmtTime(r.created)}${r.ms ? ' · ' + (r.ms / 1000).toFixed(1) + ' с' : ''} ${flags}</div>
     <div class="draft-text">${esc(r.reply || '(без ответа)')}</div>
     ${r.correction ? `<div class="draft-fix">✍ Как надо: ${esc(r.correction)}</div>` : ''}
     <div class="draft-actions">
@@ -639,7 +689,8 @@ function reviewBox(rv) {
 async function addKb(entries, btn) {
   try {
     await api('/api/kb', { body: { entries } });
-    toast(entries.length > 1 ? `Добавлено в базу знаний: ${entries.length}` : 'Добавлено в базу знаний');
+    const cand = entries.some((e) => e.source === 'analysis');
+    toast((entries.length > 1 ? `Добавлено в базу знаний: ${entries.length}` : 'Добавлено в базу знаний') + (cand ? ' как кандидаты — утвердите в «Базе знаний»' : ''));
     if (btn) { btn.disabled = true; btn.textContent = '✓ В базе'; }
   } catch (e) { toast(e.message, true); }
 }
@@ -695,7 +746,15 @@ async function renderArchive() {
       <input type="date" id="stFrom" style="width:auto"> — <input type="date" id="stTo" style="width:auto" value="${dateInput(new Date())}"></div>
       <div id="stBox" style="margin-top:14px">Загрузка…</div></div>
 
-    <div class="card"><h3>3. Разбор переписок нейросетью</h3>
+    <div class="card"><h3>3. Расходы Авито на целевые действия</h3>
+      <div class="muted small">Фактические списания из API Авито (раздел CPA), только чтение: какие чаты и звонки оплачены, сколько стоили, на каком сообщении сработала оплата и что можно опротестовать (срок — 7 дней). Правила оплаты — docs/avito-cpa-rules.md.</div>
+      <div class="row" style="margin-top:12px"><label style="flex-direction:row;align-items:center">За <input type="number" id="cpaDays" value="60" min="1" max="180" style="width:80px"> дней</label>
+        <button class="btn primary" id="cpaStart" ${st.avitoConfigured ? '' : 'disabled'}>⬇ Загрузить списания</button></div>
+      <div id="cpaJob"></div>
+      <div id="cpaBox" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card"><h3>4. Разбор переписок нейросетью</h3>
       <div class="muted small">Нейросеть читает диалоги как руководитель отдела продаж: что спрашивали клиенты, где продавец ошибся, как надо было ответить. Потом собирает сводный отчёт с правилами и ответами для базы знаний. Примерно 1–3 тыс. токенов на чат.</div>
       <div class="row" style="margin-top:12px">
         <label style="flex-direction:row;align-items:center">Чатов <input type="number" id="rvCount" value="30" min="1" max="200" style="width:90px"></label>
@@ -711,20 +770,25 @@ async function renderArchive() {
     const d = await api('/api/archive/stats?' + ($('#stFrom').value ? qs : `to=${$('#stTo').value}`));
     $('#stBox').innerHTML = !d.chats ? `<div class="muted">Пока нет входящих чатов в базе (всего чатов: ${d.totalChats}). Загрузите историю.</div>` : `
       <div class="kpis">
-        <div class="kpi"><span>Входящих чатов</span><b>${d.chats}</b></div>
-        <div class="kpi"><span>Оставили телефон</span><b>${d.leads} · ${d.conversion}%</b></div>
+        <div class="kpi"><span>Входящих чатов (зрелых)</span><b>${d.chats} (${d.mature})</b></div>
+        <div class="kpi"><span>Телефон за 7 дней (зрелые чаты)</span><b>${d.leads7d} из ${d.cohortBase} · ${d.conversion}%</b></div>
         <div class="kpi"><span>Без ответа продавца</span><b style="color:${d.unanswered ? 'var(--red)' : 'inherit'}">${d.unanswered}</b></div>
         <div class="kpi"><span>Продавец просил телефон</span><b>${d.askedPhonePct}%</b></div>
         <div class="kpi"><span>Первый ответ (медиана)</span><b>${fmtDur(d.medianFirstResponse)}</b></div>
         <div class="kpi"><span>днём 9–21 / ночью</span><b>${fmtDur(d.medianFirstResponseDay)} / ${fmtDur(d.medianFirstResponseNight)}</b></div>
         <div class="kpi"><span>Ответ за 5 мин / за час</span><b>${d.within5Pct}% / ${d.within60Pct}%</b></div>
         <div class="kpi"><span>Ушли после ответа без телефона</span><b>${d.lostAfterReply}</b></div>
+        <div class="kpi"><span>Вероятно платных чатов (оценка)</span><b>${d.billedEst}</b></div>
+        <div class="kpi"><span>Из них без телефона</span><b style="color:${d.billedNoPhone ? 'var(--orange)' : 'inherit'}">${d.billedNoPhone}</b></div>
+        <div class="kpi"><span>Телефон до ответа продавца</span><b>${d.leadsBeforeReply}</b></div>
+        <div class="kpi"><span>Исходящие чаты / с телефоном</span><b>${d.outgoing} / ${d.outgoingLeads}</b></div>
       </div>
+      <div class="muted small" style="margin-top:8px">Конверсия считается по одной группе: входящие чаты, начатые в периоде, и телефон от них в течение ${d.cohortDays} дней; телефон, оставленный до ответа продавца, не засчитывается; чаты моложе ${d.cohortDays} дней (${d.immature}) ещё зреют. «Платные» — оценка по правилам Авито п. 3.1: ${d.billedBy.map((x) => `${esc(x.label)} — ${x.n}`).join(', ') || '—'}. Факт списаний — в блоке «Расходы Авито». <button class="link" id="recount">Пересчитать телефоны по всей базе</button></div>
       <div class="muted small" style="margin:10px 0">Загружено полностью: ${d.loadedChats} из ${d.totalChats} чатов, сообщений ${d.totalMessages}. В среднем на чат: клиент ${d.avgClientMsgs}, продавец ${d.avgSellerMsgs} сообщ.
         ${d.authors.length > 1 ? '<br>Сообщения продавца по авторам (ID сотрудника): ' + d.authors.map((a) => `${esc(a.id)} — ${a.messages}`).join(', ') : ''}
         <br>Ответы прежнего бота («ИИ Диалоги») Авито не отличает от ответов продавцов — они тоже считаются здесь.</div>
-      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Месяц</th><th>Чатов</th><th>С ответом</th><th>Телефон</th><th>Конверсия</th><th>Первый ответ</th></tr></thead><tbody>
-        ${d.months.map((m) => `<tr><td>${m.month}</td><td>${m.chats}</td><td>${m.answered}</td><td>${m.leads}</td><td>${m.conversion}%</td><td>${fmtDur(m.medianFirstResponse)}</td></tr>`).join('')}
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Месяц</th><th>Чатов</th><th>С ответом</th><th>Телефон за 7 дней</th><th>Конверсия</th><th>Первый ответ</th></tr></thead><tbody>
+        ${d.months.map((m) => `<tr><td>${m.month}</td><td>${m.chats}</td><td>${m.answered}</td><td>${m.leads}</td><td>${m.conversion === null ? 'зреет' : m.conversion + '%'}</td><td>${fmtDur(m.medianFirstResponse)}</td></tr>`).join('')}
       </tbody></table></div>`;
   };
   const loadReport = async () => {
@@ -757,6 +821,40 @@ async function renderArchive() {
     $$('[data-faq]', box).forEach((b) => b.addEventListener('click', () => { const f = r.faq[Number(b.dataset.faq)]; addKb([{ category: 'faq', title: f.q, content: f.a, source: 'analysis' }], b); }));
     $('#addAllFaq')?.addEventListener('click', (e) => addKb(r.faq.map((f) => ({ category: 'faq', title: f.q, content: f.a, source: 'analysis' })), e.target));
   };
+  view().addEventListener('click', async (e) => {
+    if (e.target.id !== 'recount') return;
+    const r = await api('/api/archive/recount', { body: {} });
+    toast(`Проверено чатов без телефона: ${r.checked}, найдено номеров: ${r.found}`);
+    loadStats();
+  });
+  const rub = (p) => (p == null ? '—' : Math.round(p / 100).toLocaleString('ru-RU') + ' ₽');
+  const loadCpa = async () => {
+    const d = await api('/api/cpa/report');
+    const box = $('#cpaBox');
+    if (!box) return;
+    if (!d.chats.n && !d.calls.n) { box.innerHTML = '<div class="muted">Списаний пока нет — нажмите «Загрузить списания».</div>'; return; }
+    box.innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><span>Платных чатов</span><b>${d.chats.n} · ${rub(d.chats.sum)}</b></div>
+        <div class="kpi"><span>Платных звонков</span><b>${d.calls.n} · ${rub(d.calls.sum)}</b></div>
+        <div class="kpi"><span>Оплачено без телефона (чаты в базе)</span><b style="color:${d.noPhoneCount ? 'var(--orange)' : 'inherit'}">${d.noPhoneCount} из ${d.inDb}</b></div>
+        <div class="kpi"><span>Цена одного телефона из чата</span><b>${rub(d.costPerPhone)}</b></div>
+      </div>
+      <div class="muted small" style="margin:8px 0">Оплата сработала на сообщении: клиента — ${d.triggerSide['клиент']}, продавца — ${d.triggerSide['продавец']}, не найдено в базе — ${d.triggerSide['не найдено']}. Тип целевого чата: ${d.chats.byTarget.map((x) => `${esc(x.key)} — ${x.n}`).join(', ')}. Наша оценка «платный» совпала с фактом в ${d.estimateAgreement ?? '—'}% чатов.${d.calls.n ? ` Звонки: ${d.calls.byStatus.map((x) => `${esc(x.key)} — ${x.n}`).join(', ')}; средняя длительность ${d.calls.avgDuration} с.` : ''}</div>
+      ${d.contest.length ? `<h4>Можно опротестовать: звонок и чат одного покупателя (п. 3.5)</h4>
+        <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Клиент</th><th>Чат</th><th>Звонок</th><th>Срок жалобы</th><th></th></tr></thead><tbody>
+        ${d.contest.map((x) => `<tr><td>${esc(x.client_name || '')}<div class="small muted">${esc(x.phone)}</div></td><td>${rub(x.chat_price)} · ${fmtTime(x.chat_at)}</td><td>${rub(x.call_price)} · ${fmtTime(x.call_at)}</td>
+          <td>${x.deadlinePassed ? '<span class="badge">прошёл</span>' : '<span class="badge green">идёт</span>'}</td><td><a href="#/chats/${encodeURIComponent(x.chat_id)}">чат →</a></td></tr>`).join('')}
+        </tbody></table></div><div class="muted small">Жалобу подаёт человек в Авито Pro после проверки. Автоматически сервис ничего не опротестовывает.</div>` : ''}
+      ${d.noPhone.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">Оплаченные чаты без телефона (${d.noPhoneCount})</summary>
+        <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Клиент</th><th>Тип</th><th>Сообщение-триггер</th><th>Цена</th><th></th></tr></thead><tbody>
+        ${d.noPhone.map((x) => `<tr><td>${esc(x.client_name || '')}<div class="small muted">${esc(x.item_title || '')}</div></td><td>${esc(x.target_type || '')}</td><td class="small">${esc((x.message || '').slice(0, 160))}</td><td>${rub(x.price)}</td><td><a href="#/chats/${encodeURIComponent(x.chat_id)}">чат →</a></td></tr>`).join('')}
+        </tbody></table></div></details>` : ''}`;
+  };
+  $('#cpaStart').addEventListener('click', async () => {
+    try { await api('/api/cpa/import', { body: { days: Number($('#cpaDays').value) } }); toast('Загрузка списаний запущена'); } catch (e) { toast(e.message, true); }
+  });
+  watchJob('cpa', $('#cpaJob'), 'Загружаю списания Авито…', loadCpa);
   $('#stFrom').addEventListener('change', loadStats);
   $('#stTo').addEventListener('change', loadStats);
   $('#impStart').addEventListener('click', async () => {
@@ -772,7 +870,7 @@ async function renderArchive() {
   });
   watchJob('import', $('#impJob'), 'Загружаю историю…', () => { loadStats(); loadStatus(); });
   watchJob('review', $('#rvJob'), 'Разбираю переписки…', loadReport);
-  await Promise.all([loadStats(), loadReport()]);
+  await Promise.all([loadStats(), loadReport(), loadCpa()]);
 }
 
 // ---------- база знаний ----------
@@ -795,7 +893,9 @@ async function kbEntries(box) {
   const cats = d.categories;
   const counts = {};
   for (const e of d.entries) counts[e.category] = (counts[e.category] || 0) + 1;
-  const shown = d.entries.filter((e) => !state.kbCat || e.category === state.kbCat);
+  const isCand = (e) => e.status === 'candidate';
+  const nCand = d.entries.filter(isCand).length;
+  const shown = d.entries.filter((e) => (state.kbCat === 'candidate' ? isCand(e) : !state.kbCat || e.category === state.kbCat));
   box.innerHTML = `
     <div class="notice info" style="margin-bottom:16px">Всё, что здесь включено, агент получает вместе с правилами ответа и карточкой автомобиля. Если база станет большой, в промпт попадут записи, ближе всего подходящие к вопросу клиента. Проверяйте результат в «Тест агента» или прогоном по реальным чатам.</div>
     <div class="card"><h3 id="kbFormTitle">Новая запись</h3><div class="form">
@@ -808,13 +908,13 @@ async function kbEntries(box) {
       <div class="row"><button class="btn primary" id="kbSave">Сохранить</button><button class="btn" id="kbReset">Очистить</button></div>
     </div></div>
     <div class="card"><div class="row" style="margin-bottom:8px"><h3 style="margin:0">Записи</h3><span class="spacer"></span>
-      <div class="chips"><button class="chip ${!state.kbCat ? 'active' : ''}" data-cat="">Все ${d.entries.length}</button>${Object.entries(cats).map(([k, v]) => `<button class="chip ${state.kbCat === k ? 'active' : ''}" data-cat="${k}">${v} ${counts[k] || 0}</button>`).join('')}</div></div>
-      ${shown.map((e) => `<div class="kb-item ${e.enabled ? '' : 'off'}">
-        <div><span class="badge">${esc(cats[e.category] || e.category)}</span> ${e.source && e.source !== 'manual' ? `<span class="badge blue">${e.source === 'correction' ? 'из исправлений' : 'из разбора'}</span>` : ''}
+      <div class="chips"><button class="chip ${!state.kbCat ? 'active' : ''}" data-cat="">Все ${d.entries.length}</button>${nCand ? `<button class="chip ${state.kbCat === 'candidate' ? 'active' : ''}" data-cat="candidate">Ждут проверки ${nCand}</button>` : ''}${Object.entries(cats).map(([k, v]) => `<button class="chip ${state.kbCat === k ? 'active' : ''}" data-cat="${k}">${v} ${counts[k] || 0}</button>`).join('')}</div></div>
+      ${shown.map((e) => `<div class="kb-item ${e.enabled && !isCand(e) ? '' : 'off'}">
+        <div><span class="badge">${esc(cats[e.category] || e.category)}</span> ${isCand(e) ? '<span class="badge orange">кандидат — агент не видит</span>' : ''} ${e.source && e.source !== 'manual' ? `<span class="badge blue">${e.source === 'correction' ? 'из исправлений' : 'из разбора'}</span>` : ''}
           ${e.title ? `<div class="kb-title" style="margin-top:6px">${esc(e.title)}</div>` : ''}<div class="kb-content">${esc(e.content)}</div></div>
         <div class="row" style="align-items:flex-start;flex-wrap:nowrap">
           <label class="switch" title="Включена"><input type="checkbox" data-on="${e.id}" ${e.enabled ? 'checked' : ''}><span></span></label>
-          <button class="btn sm" data-edit="${e.id}">Изменить</button><button class="btn sm danger" data-del="${e.id}">✕</button></div>
+          ${isCand(e) ? `<button class="btn sm primary" data-approve="${e.id}">Утвердить</button>` : ''}<button class="btn sm" data-edit="${e.id}">Изменить</button><button class="btn sm danger" data-del="${e.id}">✕</button></div>
       </div>`).join('') || '<div class="muted">Пока пусто. Добавьте факты вручную или возьмите их из отчёта в «Архиве».</div>'}
     </div>`;
   const setHelp = () => { const h = KB_HELP[$('#kbCat').value]; $('#kbTitleLbl').textContent = h[0]; $('#kbContentLbl').textContent = h[1]; $('#kbHelp').textContent = h[2]; };
@@ -839,6 +939,7 @@ async function kbEntries(box) {
     const e = d.entries.find((x) => x.id === Number(b.dataset.on));
     await api('/api/kb', { body: { ...e, enabled: b.checked } }); kbEntries(box);
   }));
+  $$('[data-approve]', box).forEach((b) => b.addEventListener('click', async () => { await api(`/api/kb/${b.dataset.approve}/status`, { body: { status: 'approved' } }); toast('Утверждено — агент будет это использовать'); kbEntries(box); }));
   $$('[data-del]', box).forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('Удалить запись?')) return;
     await api('/api/kb/' + b.dataset.del, { method: 'DELETE' }); kbEntries(box);
@@ -925,9 +1026,11 @@ async function renderReview() {
         <label style="flex-direction:row;align-items:center"><input type="checkbox" id="rbSkip" checked> пропускать уже прогнанные</label>
         <button class="btn primary" id="rbStart">🧪 Прогнать</button>
       </div>
-      <label style="margin-top:12px">Модели — отвечают параллельно на каждое сообщение
+      <div style="margin-top:14px"><b class="small">Стратегии</b> <span class="small muted">— каждая отвечает на каждое сообщение, со своей инструкцией (Настройки → Стратегии)</span>
+        <div class="chips" id="rbVersions" style="margin-top:6px"></div></div>
+      <label style="margin-top:12px">Модели
         <input type="text" id="rbModels" placeholder="gpt-4o-mini, gpt-4.1-mini, openrouter:anthropic/claude-sonnet-4.5">
-        <span class="field-help">Через запятую. Модели OpenAI — как есть (gpt-4o-mini, gpt-4.1, gpt-5-mini…); другие компании — через OpenRouter с приставкой <code>openrouter:</code>, ключ в Настройки → Авито. Пусто — только основная модель агента. Каждая модель тратит свои токены.</span></label>
+        <span class="field-help">Через запятую; каждая стратегия × каждая модель = отдельная конфигурация. Чтобы сравнить стратегии честно, берите одну модель. Модели OpenAI — как есть; других компаний — с приставкой <code>openrouter:</code>, ключ в Настройки → Авито. Каждая конфигурация тратит свои токены.</span></label>
       <div id="rbJob"></div>
     </div>
     <div class="card" id="modelCard"></div>
@@ -937,10 +1040,19 @@ async function renderReview() {
   const load = async () => {
     const d = await api('/api/runs?limit=80&filter=' + state.runFilter);
     const s = d.stats;
-    if ($('#rbModels') && !$('#rbModels').dataset.init) { $('#rbModels').value = (d.compareModels.length ? d.compareModels : [d.primaryModel]).join(', '); $('#rbModels').dataset.init = '1'; }
-    $('#modelCard').innerHTML = d.models.length ? `<h3>Сравнение моделей</h3>
-      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Модель</th><th>Ответов</th><th>👍</th><th>👎</th><th>Доля хороших</th><th>Ошибок</th><th>Токенов на ответ</th><th>Время ответа</th><th>Передал менеджеру</th></tr></thead><tbody>
-      ${d.models.map((m) => { const rated = (m.good || 0) + (m.bad || 0); return `<tr><td><b>${esc(m.model || '—')}</b></td><td>${m.total}</td><td>${m.good || 0}</td><td>${m.bad || 0}</td>
+    if ($('#rbModels') && !$('#rbModels').dataset.init) {
+      const cc = d.compareConfigs || [];
+      const models = cc.length ? [...new Set(cc.map((c) => c.model).filter(Boolean))] : (d.compareModels.length ? d.compareModels : [d.primaryModel]);
+      const chosen = new Set(cc.length ? cc.map((c) => String(c.versionId || 0)) : ['0']);
+      $('#rbModels').value = models.join(', ');
+      $('#rbVersions').innerHTML = [{ id: 0, key: 'Настройки', version: '(правила из «Агент»)' }, ...d.versions]
+        .map((v) => `<label class="chip ${chosen.has(String(v.id)) ? 'active' : ''}" style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" data-ver="${v.id}" ${chosen.has(String(v.id)) ? 'checked' : ''} style="display:none">${esc(v.key)} ${esc(v.version)}</label>`).join('');
+      $$('#rbVersions input').forEach((i) => i.addEventListener('change', () => i.parentElement.classList.toggle('active', i.checked)));
+      $('#rbModels').dataset.init = '1';
+    }
+    $('#modelCard').innerHTML = d.models.length ? `<h3>Сравнение конфигураций (стратегия × модель)</h3>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Конфигурация</th><th>Ответов</th><th>👍</th><th>👎</th><th>Доля хороших</th><th>Ошибок</th><th>Токенов на ответ</th><th>Время ответа</th><th>Передал менеджеру</th></tr></thead><tbody>
+      ${d.models.map((m) => { const rated = (m.good || 0) + (m.bad || 0); return `<tr><td><b>${esc(cfgLabel(m))}</b></td><td>${m.total}</td><td>${m.good || 0}</td><td>${m.bad || 0}</td>
         <td>${rated ? `<b>${Math.round(((m.good || 0) / rated) * 100)}%</b>` : '—'}</td><td>${m.errors || 0}</td><td>${m.avg_tokens ?? '—'}</td><td>${m.avg_ms ? (m.avg_ms / 1000).toFixed(1) + ' с' : '—'}</td><td>${m.handoffs || 0}</td></tr>`; }).join('')}
       </tbody></table></div><div class="muted small" style="margin-top:8px">Оценивайте ответы 👍/👎 — таблица покажет, какая модель лучше. Время и токены помогают сравнить скорость и цену.</div>` : '';
     const rated = (s.good || 0) + (s.bad || 0);
@@ -965,9 +1077,15 @@ async function renderReview() {
   $$('[data-rf]').forEach((b) => b.addEventListener('click', () => { state.runFilter = b.dataset.rf; $$('[data-rf]').forEach((x) => x.classList.toggle('active', x === b)); load(); }));
   $('#rbStart').addEventListener('click', async () => {
     try {
-      const models = $('#rbModels').value.trim();
-      await api('/api/settings', { body: { compare_models: models } }); // запоминаем выбор: им же пользуется кнопка «Прогнать ИИ» в чате
-      await api('/api/replay-batch', { body: { count: Number($('#rbCount').value), maxTurns: Number($('#rbTurns').value), order: $('#rbOrder').value, onlyLeads: $('#rbLeads').checked, skipDone: $('#rbSkip').checked, models } });
+      const models = $('#rbModels').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+      const vers = $$('#rbVersions input:checked').map((i) => Number(i.dataset.ver) || null);
+      if (!vers.length) return toast('Выберите хотя бы одну стратегию', true);
+      const configs = [];
+      for (const versionId of vers) for (const model of (models.length ? models : [null])) configs.push({ versionId, model });
+      if (configs.length > 8) return toast('Не больше 8 конфигураций за раз', true);
+      // запоминаем выбор: им же пользуется кнопка «Прогнать ИИ» в чате
+      await api('/api/settings', { body: { compare_configs: JSON.stringify(configs), compare_models: models.join(', ') } });
+      await api('/api/replay-batch', { body: { count: Number($('#rbCount').value), maxTurns: Number($('#rbTurns').value), order: $('#rbOrder').value, onlyLeads: $('#rbLeads').checked, skipDone: $('#rbSkip').checked, configs } });
       toast('Прогон запущен');
     } catch (e) { toast(e.message, true); }
   });

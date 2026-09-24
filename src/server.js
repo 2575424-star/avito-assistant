@@ -9,6 +9,7 @@ const agent = require('./agent');
 const engine = require('./engine');
 const knowledge = require('./knowledge');
 const history = require('./history');
+const billing = require('./billing');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -17,6 +18,15 @@ const SESSION = ADMIN_PASSWORD ? crypto.createHmac('sha256', ADMIN_PASSWORD).upd
 const SECRET_KEYS = ['avito_client_secret', 'openai_api_key', 'openrouter_api_key', 'tg_bot_token'];
 
 /** Список моделей из запроса: массив или строка через запятую; пусто — null (берётся из настроек). */
+/** Конфигурации прогона из запроса: [{versionId, model}]. */
+function configList(v) {
+  if (!Array.isArray(v) || !v.length) return null;
+  return v.slice(0, 8).map((c) => ({ versionId: Number(c.versionId) || null, model: String(c.model || '').trim() || null }));
+}
+
+const RUN_SELECT = `SELECT r.*, c.client_name, c.item_title, c.item_price, v.key AS v_key, v.version AS v_version
+  FROM agent_runs r LEFT JOIN chats c ON c.id = r.chat_id LEFT JOIN agent_versions v ON v.id = r.agent_version_id`;
+
 function modelList(v) {
   const list = (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)).map((x) => String(x).trim()).filter(Boolean);
   return list.length ? [...new Set(list)].slice(0, 6) : null;
@@ -94,7 +104,9 @@ function dashboard(from, to) {
       bot: one("SELECT COUNT(*) v FROM messages WHERE source IN ('bot','quick','template') AND created BETWEEN ? AND ?", d, d + 86399),
     });
   }
-  return { incoming, leads, leadsIn, conversion: incoming ? Math.round((leadsIn / incoming) * 1000) / 10 : 0, botMsgs, clientMsgs, botChats, handoffs, waiting, totalChats, days };
+  // конверсия — по одной группе: входящие чаты периода и телефон от них за 7 дней (см. history.managerStats)
+  const cohort = history.managerStats(from, to);
+  return { incoming: cohort.chats, leads, leadsIn, conversion: cohort.conversion, cohort, botMsgs, clientMsgs, botChats, handoffs, waiting, totalChats, days };
 }
 
 // ---------- роутинг ----------
@@ -184,7 +196,7 @@ async function api(req, res, url) {
     if (!action && m === 'GET') {
       const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(id);
       const events = db.prepare('SELECT * FROM events WHERE chat_id = ? ORDER BY id DESC LIMIT 30').all(id);
-      const runs = db.prepare('SELECT * FROM agent_runs WHERE chat_id = ? ORDER BY id ASC').all(id);
+      const runs = db.prepare(`${RUN_SELECT} WHERE r.chat_id = ? ORDER BY r.id ASC`).all(id);
       const reviewRow = db.prepare('SELECT * FROM chat_reviews WHERE chat_id = ?').get(id);
       const review = reviewRow ? { ...reviewRow, result: JSON.parse(reviewRow.result || '{}') } : null;
       return send(res, 200, { chat, messages, events, runs, review, sendEnabled: avito.sendingEnabled() });
@@ -216,7 +228,7 @@ async function api(req, res, url) {
     if (action === '/replay' && m === 'POST') {
       const b = await readBody(req);
       try {
-        return send(res, 200, await history.replayChat(id, { maxTurns: Math.min(20, Number(b.maxTurns) || 8), models: modelList(b.models) }));
+        return send(res, 200, await history.replayChat(id, { maxTurns: Math.min(20, Number(b.maxTurns) || 8), models: modelList(b.models), configs: configList(b.configs) }));
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
     if (action === '/review' && m === 'POST') {
@@ -318,9 +330,9 @@ async function api(req, res, url) {
 
   // ----- фоновые задачи -----
   if (p === '/api/jobs') {
-    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review') });
+    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review'), cpa: history.jobState('cpa') });
   }
-  mm = p.match(/^\/api\/jobs\/(import|replay|review)\/stop$/);
+  mm = p.match(/^\/api\/jobs\/(import|replay|review|cpa)\/stop$/);
   if (mm && m === 'POST') { history.stopJob(mm[1]); return send(res, 200, { ok: true }); }
 
   // ----- архив и аналитика менеджеров -----
@@ -328,6 +340,21 @@ async function api(req, res, url) {
     const b = await readBody(req);
     if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
     try { return send(res, 200, history.importHistory({ maxChats: Number(b.maxChats) || 100000 })); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  // ----- расходы Авито (целевые действия) -----
+  if (p === '/api/cpa/import' && m === 'POST') {
+    const b = await readBody(req);
+    if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
+    try {
+      return send(res, 200, history.startJob('cpa', (job) => billing.importCpa({ days: Math.min(180, Number(b.days) || 60), calls: b.calls !== false }, job)));
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/cpa/report') {
+    const { from, to } = periodFromQuery(q);
+    return send(res, 200, billing.report(q.get('from') ? from : 0, to));
+  }
+  if (p === '/api/archive/recount' && m === 'POST') {
+    return send(res, 200, history.recountLeads());
   }
   if (p === '/api/archive/stats') {
     const { from, to } = periodFromQuery(q);
@@ -362,7 +389,7 @@ async function api(req, res, url) {
     try {
       return send(res, 200, history.replayBatch({
         count: Math.min(100, Number(b.count) || 10), maxTurns: Math.min(10, Number(b.maxTurns) || 3),
-        order: b.order, onlyLeads: Boolean(b.onlyLeads), skipDone: b.skipDone !== false, models: modelList(b.models),
+        order: b.order, onlyLeads: Boolean(b.onlyLeads), skipDone: b.skipDone !== false, models: modelList(b.models), configs: configList(b.configs),
       }));
     } catch (e) { return send(res, 400, { error: e.message }); }
   }
@@ -381,9 +408,11 @@ async function api(req, res, url) {
     // группа = одно сообщение клиента; в группу берём ответы всех моделей (последний от каждой)
     const groups = db.prepare(`SELECT r.chat_id, r.at_message_id, MAX(r.id) mx FROM agent_runs r ${sqlWhere}
       GROUP BY r.chat_id, r.at_message_id ORDER BY mx DESC LIMIT ?`).all(...(q.get('model') ? [q.get('model')] : []), limit);
-    const groupRuns = db.prepare(`SELECT r.*, c.client_name, c.item_title, c.item_price FROM agent_runs r LEFT JOIN chats c ON c.id = r.chat_id
-      WHERE r.chat_id = ? AND r.at_message_id = ? AND r.id IN (SELECT MAX(id) FROM agent_runs WHERE chat_id = r.chat_id AND at_message_id = r.at_message_id GROUP BY COALESCE(model, ''))
-      ORDER BY r.model`);
+    // последний ответ каждой конфигурации (версия × модель) на это сообщение
+    const groupRuns = db.prepare(`${RUN_SELECT}
+      WHERE r.chat_id = ? AND r.at_message_id = ? AND r.id IN (SELECT MAX(id) FROM agent_runs WHERE chat_id = r.chat_id AND at_message_id = r.at_message_id
+        GROUP BY COALESCE(model, ''), COALESCE(agent_version_id, 0))
+      ORDER BY v.key, r.model`);
     const rows = groups.flatMap((g) => groupRuns.all(g.chat_id, g.at_message_id));
     const nextOut = db.prepare("SELECT direction, source, text FROM messages WHERE chat_id = ? AND created > ? AND source != 'system' ORDER BY created ASC, rowid ASC LIMIT 6");
     for (const r of rows) {
@@ -394,10 +423,13 @@ async function api(req, res, url) {
     }
     const stats = db.prepare(`SELECT COUNT(*) total, SUM(rating = 1) good, SUM(rating = -1) bad, SUM(rating IS NULL) unrated,
       SUM(kind = 'shadow') shadow, SUM(kind = 'replay') replay, SUM(tokens) tokens FROM agent_runs`).get();
-    const models = db.prepare(`SELECT model, COUNT(*) total, SUM(rating = 1) good, SUM(rating = -1) bad, SUM(comment LIKE 'Ошибка%') errors,
-      ROUND(AVG(tokens)) avg_tokens, ROUND(AVG(ms)) avg_ms, SUM(handoff) handoffs, SUM(phone IS NOT NULL) phones
-      FROM agent_runs GROUP BY model ORDER BY total DESC`).all();
-    return send(res, 200, { runs: rows, stats, models, compareModels: agent.compareModels(), primaryModel: getSetting('openai_model') });
+    const models = db.prepare(`SELECT r.model, r.agent_version_id, v.key AS v_key, v.version AS v_version, COUNT(*) total, SUM(r.rating = 1) good, SUM(r.rating = -1) bad,
+      SUM(r.comment LIKE 'Ошибка%') errors, ROUND(AVG(r.tokens)) avg_tokens, ROUND(AVG(r.ms)) avg_ms, SUM(r.handoff) handoffs, SUM(r.phone IS NOT NULL) phones
+      FROM agent_runs r LEFT JOIN agent_versions v ON v.id = r.agent_version_id GROUP BY r.model, r.agent_version_id ORDER BY total DESC`).all();
+    let compareConfigs = [];
+    try { compareConfigs = JSON.parse(getSetting('compare_configs') || '[]'); } catch { /* ignore */ }
+    const versions = db.prepare("SELECT id, key, version, title FROM agent_versions WHERE status = 'active' ORDER BY key, id").all();
+    return send(res, 200, { runs: rows, stats, models, versions, compareConfigs, compareModels: agent.compareModels(), primaryModel: getSetting('openai_model') });
   }
   mm = p.match(/^\/api\/runs\/(\d+)$/);
   if (mm && m === 'POST') {
@@ -419,6 +451,29 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
+  // ----- версии агента (стратегии) -----
+  if (p === '/api/agent-versions' && m === 'GET') {
+    const rows = db.prepare(`SELECT v.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_version_id = v.id) runs FROM agent_versions v ORDER BY v.key, v.id`).all();
+    return send(res, 200, { versions: rows, liveVersionId: Number(getSetting('live_agent_version_id')) || null });
+  }
+  if (p === '/api/agent-versions' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.key?.trim() || !b.version?.trim() || !b.base_prompt?.trim()) return send(res, 400, { error: 'Нужны ключ, номер версии и общая инструкция' });
+    if (db.prepare('SELECT 1 FROM agent_versions WHERE key = ? AND version = ?').get(b.key.trim(), b.version.trim())) {
+      return send(res, 400, { error: 'Такая версия уже есть. Версии не меняются — укажите новый номер, например v0.2.1' });
+    }
+    const r = db.prepare('INSERT INTO agent_versions(key, version, title, base_prompt, strategy, model, temperature, status, created) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(b.key.trim(), b.version.trim(), b.title?.trim() || null, b.base_prompt.trim(), b.strategy?.trim() || null, b.model?.trim() || null,
+        b.temperature === '' || b.temperature == null ? null : Number(b.temperature), 'active', now());
+    return send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+  }
+  mm = p.match(/^\/api\/agent-versions\/(\d+)\/status$/);
+  if (mm && m === 'POST') {
+    const b = await readBody(req);
+    db.prepare('UPDATE agent_versions SET status = ? WHERE id = ?').run(b.status === 'archived' ? 'archived' : 'active', Number(mm[1]));
+    return send(res, 200, { ok: true });
+  }
+
   // ----- база знаний -----
   if (p === '/api/kb' && m === 'GET') {
     return send(res, 200, { entries: db.prepare('SELECT * FROM kb ORDER BY category, id DESC').all(), categories: knowledge.KB_CATEGORIES });
@@ -434,12 +489,20 @@ async function api(req, res, url) {
           .run(e.category, e.title?.trim() || null, e.content.trim(), e.enabled === false || e.enabled === 0 ? 0 : 1, now(), e.id);
         ids.push(e.id);
       } else {
-        ids.push(Number(db.prepare('INSERT INTO kb(category, title, content, enabled, source, created, updated) VALUES(?,?,?,?,?,?,?)')
-          .run(e.category, e.title?.trim() || null, e.content.trim(), e.enabled === false ? 0 : 1, e.source || 'manual', now(), now()).lastInsertRowid));
+        // из разбора чатов — кандидат: факты из старых ответов продавцов нужно проверить перед использованием
+        const status = e.source === 'analysis' ? 'candidate' : 'approved';
+        ids.push(Number(db.prepare('INSERT INTO kb(category, title, content, enabled, source, status, created, updated) VALUES(?,?,?,?,?,?,?,?)')
+          .run(e.category, e.title?.trim() || null, e.content.trim(), e.enabled === false ? 0 : 1, e.source || 'manual', status, now(), now()).lastInsertRowid));
       }
     }
     if (!ids.length) return send(res, 400, { error: 'Нужен текст и категория' });
     return send(res, 200, { ok: true, ids });
+  }
+  mm = p.match(/^\/api\/kb\/(\d+)\/status$/);
+  if (mm && m === 'POST') {
+    const b = await readBody(req);
+    db.prepare('UPDATE kb SET status = ?, updated = ? WHERE id = ?').run(b.status === 'candidate' ? 'candidate' : 'approved', now(), Number(mm[1]));
+    return send(res, 200, { ok: true });
   }
   mm = p.match(/^\/api\/kb\/(\d+)$/);
   if (mm && m === 'DELETE') {
@@ -500,12 +563,13 @@ async function api(req, res, url) {
       const history = (b.history || []).map((x) => ({ direction: x.direction === 'out' ? 'out' : 'in', type: 'text', text: String(x.text || ''), source: x.direction === 'out' ? 'bot' : 'client' }));
       const item = b.item?.id ? { id: Number(b.item.id), title: b.item.title } : b.item?.title ? b.item : null;
       const models = modelList(b.models);
+      const versionId = Number(b.versionId) || null;
       if (models) {
-        const results = await Promise.allSettled(models.map((model) => agent.generateReply({ item, phone: null, history }, { model })));
+        const results = await Promise.allSettled(models.map((model) => agent.generateReply({ item, phone: null, history }, { model, versionId })));
         const variants = results.map((x, i) => (x.status === 'fulfilled' ? x.value : { model: models[i], error: x.reason.message }));
         return send(res, 200, { ...(variants.find((v) => !v.error) || {}), variants });
       }
-      const r = await agent.generateReply({ item, phone: null, history });
+      const r = await agent.generateReply({ item, phone: null, history }, { versionId });
       return send(res, 200, r);
     } catch (e) {
       return send(res, 400, { error: e.message });

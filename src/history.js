@@ -1,9 +1,10 @@
 // Архив переписок: загрузка всей истории из Авито, статистика работы менеджеров,
 // выгрузка для анализа, прогон агента по реальным чатам и разбор чатов нейросетью.
-const { db, logEvent } = require('./db');
+const { db, logEvent, getSetting } = require('./db');
 const avito = require('./avito');
 const agent = require('./agent');
 const engine = require('./engine');
+const chatstate = require('./chatstate');
 
 const now = () => Math.floor(Date.now() / 1000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -41,12 +42,8 @@ async function importChatMessages(chatId, uid, maxMessages = 3000) {
   }
   // Авито отдаёт от новых к старым
   const fresh = engine.storeMessages(chatId, all.slice().reverse(), uid);
-  // телефоны из истории: фиксируем лид датой сообщения, без уведомлений
-  for (const m of fresh) {
-    if (m.source !== 'client') continue;
-    const phone = agent.extractPhone(m.text);
-    if (phone && engine.markLead(chatId, phone, 'из истории', { at: m.created || now(), silent: true })) break;
-  }
+  // телефон из истории: лид датой сообщения, без уведомлений
+  if (fresh.length) engine.detectLead(chatId, 'из истории');
   db.prepare('UPDATE chats SET history_loaded = 1 WHERE id = ?').run(chatId);
   return fresh.length;
 }
@@ -149,38 +146,53 @@ const median = (arr) => {
 const mskHour = (ts) => (new Date(ts * 1000).getUTCHours() + 3) % 24;
 const ASK_PHONE = /номер|телефон|позвон|созвон|whatsapp|ватсап|вотсап|телеграм|telegram/i;
 
+const COHORT_DAYS = 7;
+
+/**
+ * Статистика продавцов по когорте: входящие чаты, где первое живое сообщение клиента
+ * попало в период. Результат — телефон в течение 7 дней от этого сообщения.
+ * Телефон до первого ответа продавца считается отдельно; чаты моложе 7 дней — «незрелые».
+ */
 function managerStats(from, to) {
-  const chats = db.prepare(`SELECT c.* FROM chats c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.source = 'client')`).all();
-  const msgStmt = db.prepare('SELECT direction, source, created, author_id, text FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC');
+  const chats = db.prepare(`SELECT c.* FROM chats c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)`).all();
+  const msgStmt = db.prepare('SELECT id, direction, source, type, created, author_id, text FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC');
   const st = {
-    chats: 0, answered: 0, unanswered: 0, leads: 0, askedPhone: 0,
+    chats: 0, mature: 0, answered: 0, unanswered: 0, leads: 0, leads7d: 0, leadsBeforeReply: 0, askedPhone: 0,
     firstResponse: [], firstResponseDay: [], firstResponseNight: [],
     within5: 0, within60: 0, lostAfterReply: 0, clientMsgs: 0, sellerMsgs: 0,
+    billedEst: 0, billedNoPhone: 0, billedBy: {},
+    outgoing: 0, outgoingLeads: 0, systemOnly: 0,
     months: {}, authors: {},
   };
+  const cutoff = now() - COHORT_DAYS * 86400;
   for (const c of chats) {
     const msgs = msgStmt.all(c.id);
-    const firstClient = msgs.find((m) => m.source === 'client');
-    if (!firstClient || firstClient.created < from || firstClient.created > to) continue;
-    // считаем только входящие: первым написал клиент (не продавец рассылкой)
-    const firstReal = msgs.find((m) => m.source !== 'system');
-    if (firstReal && firstReal.direction === 'out') continue;
+    const dir = chatstate.direction(msgs);
+    const human = msgs.filter(chatstate.isHuman);
+    const start = human[0];
+    if (!start) { const t = msgs[0]?.created; if (t >= from && t <= to) st.systemOnly++; continue; }
+    if (start.created < from || start.created > to) continue;
+    const found = chatstate.findPhone(msgs);
+    if (dir === 'outgoing') { st.outgoing++; if (found) st.outgoingLeads++; continue; }
     st.chats++;
-    const month = new Date((firstClient.created + 3 * 3600) * 1000).toISOString().slice(0, 7);
-    const mo = (st.months[month] ||= { chats: 0, answered: 0, leads: 0, fr: [] });
+    const mature = start.created <= cutoff;
+    if (mature) st.mature++;
+    const month = new Date((start.created + 3 * 3600) * 1000).toISOString().slice(0, 7);
+    const mo = (st.months[month] ||= { chats: 0, mature: 0, answered: 0, leads: 0, fr: [] });
     mo.chats++;
-    const sellerMsgs = msgs.filter((m) => m.direction === 'out' && m.source !== 'system');
-    const reply = sellerMsgs.find((m) => m.created >= firstClient.created);
-    st.clientMsgs += msgs.filter((m) => m.source === 'client').length;
+    if (mature) mo.mature++;
+    const sellerMsgs = human.filter(chatstate.isSeller);
+    const reply = sellerMsgs.find((m) => m.created >= start.created);
+    st.clientMsgs += human.filter(chatstate.isClient).length;
     st.sellerMsgs += sellerMsgs.length;
     for (const m of sellerMsgs) st.authors[m.author_id || '—'] = (st.authors[m.author_id || '—'] || 0) + 1;
     if (reply) {
       st.answered++;
       mo.answered++;
-      const dt = reply.created - firstClient.created;
+      const dt = reply.created - start.created;
       st.firstResponse.push(dt);
       mo.fr.push(dt);
-      const h = mskHour(firstClient.created);
+      const h = mskHour(start.created);
       (h >= 9 && h < 21 ? st.firstResponseDay : st.firstResponseNight).push(dt);
       if (dt <= 300) st.within5++;
       if (dt <= 3600) st.within60++;
@@ -188,35 +200,72 @@ function managerStats(from, to) {
       st.unanswered++;
     }
     if (sellerMsgs.some((m) => ASK_PHONE.test(m.text || ''))) st.askedPhone++;
-    if (c.phone) { st.leads++; mo.leads++; }
-    const last = [...msgs].reverse().find((m) => m.source !== 'system');
-    if (reply && !c.phone && last && last.direction === 'out') st.lostAfterReply++;
+    if (found) {
+      st.leads++;
+      if (!reply || found.at < reply.created) st.leadsBeforeReply++;
+      else if (mature && found.at - start.created <= COHORT_DAYS * 86400) { st.leads7d++; mo.leads++; }
+    }
+    const cpa = chatstate.cpaState(msgs);
+    if (cpa.billed) {
+      st.billedEst++;
+      st.billedBy[cpa.trigger.label] = (st.billedBy[cpa.trigger.label] || 0) + 1;
+      if (!found) st.billedNoPhone++;
+    }
+    const last = human[human.length - 1];
+    if (reply && !found && last && chatstate.isSeller(last)) st.lostAfterReply++;
   }
-  const pct = (a) => (st.chats ? Math.round((a / st.chats) * 1000) / 10 : 0);
+  const pct = (a, b = st.chats) => (b ? Math.round((a / b) * 1000) / 10 : 0);
+  // знаменатель когортной конверсии: зрелые чаты без телефона до ответа
+  const cohortBase = Math.max(0, st.mature - st.leadsBeforeReply);
   return {
+    cohortDays: COHORT_DAYS,
     chats: st.chats,
+    mature: st.mature,
+    immature: st.chats - st.mature,
     answered: st.answered,
     unanswered: st.unanswered,
     leads: st.leads,
-    conversion: pct(st.leads),
+    leads7d: st.leads7d,
+    leadsBeforeReply: st.leadsBeforeReply,
+    cohortBase,
+    conversion: pct(st.leads7d, cohortBase),
     askedPhonePct: pct(st.askedPhone),
     medianFirstResponse: median(st.firstResponse),
     medianFirstResponseDay: median(st.firstResponseDay),
     medianFirstResponseNight: median(st.firstResponseNight),
-    within5Pct: st.answered ? Math.round((st.within5 / st.answered) * 1000) / 10 : 0,
-    within60Pct: st.answered ? Math.round((st.within60 / st.answered) * 1000) / 10 : 0,
+    within5Pct: pct(st.within5, st.answered),
+    within60Pct: pct(st.within60, st.answered),
     lostAfterReply: st.lostAfterReply,
+    billedEst: st.billedEst,
+    billedNoPhone: st.billedNoPhone,
+    billedBy: Object.entries(st.billedBy).map(([label, n]) => ({ label, n })).sort((a, b) => b.n - a.n),
+    outgoing: st.outgoing,
+    outgoingLeads: st.outgoingLeads,
+    systemOnly: st.systemOnly,
     avgClientMsgs: st.chats ? Math.round((st.clientMsgs / st.chats) * 10) / 10 : 0,
     avgSellerMsgs: st.chats ? Math.round((st.sellerMsgs / st.chats) * 10) / 10 : 0,
     authors: Object.entries(st.authors).map(([id, n]) => ({ id, messages: n })).sort((a, b) => b.messages - a.messages),
     months: Object.entries(st.months).sort().map(([month, m]) => ({
-      month, chats: m.chats, answered: m.answered, leads: m.leads,
-      conversion: m.chats ? Math.round((m.leads / m.chats) * 1000) / 10 : 0, medianFirstResponse: median(m.fr),
+      month, chats: m.chats, mature: m.mature, answered: m.answered, leads: m.leads,
+      conversion: m.mature ? Math.round((m.leads / m.mature) * 1000) / 10 : null, medianFirstResponse: median(m.fr),
     })),
     totalMessages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
     totalChats: db.prepare('SELECT COUNT(*) n FROM chats').get().n,
     loadedChats: db.prepare('SELECT COUNT(*) n FROM chats WHERE history_loaded = 1').get().n,
   };
+}
+
+/** Пересчитать телефоны по всей базе новым распознаванием (номера с точками, разбитые на два сообщения). */
+function recountLeads() {
+  const ids = db.prepare('SELECT id FROM chats WHERE phone IS NULL').all().map((r) => r.id);
+  let found = 0;
+  for (const id of ids) {
+    const msgs = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(id);
+    const f = chatstate.findPhone(msgs);
+    if (f && engine.markLead(id, f.phone, 'пересчёт', { at: f.at || now(), silent: true })) found++;
+  }
+  logEvent('import', `Пересчёт телефонов: проверено чатов ${ids.length}, найдено новых номеров ${found}`);
+  return { checked: ids.length, found };
 }
 
 // ---------- Выгрузка для анализа (формат как у avito-raw-export: одна строка — один диалог) ----------
@@ -254,40 +303,53 @@ function replyPoints(messages) {
 }
 
 /** Сгенерировать ответы агента на каждую реплику клиента, не отправляя их. */
-async function replayChat(chatId, { maxTurns = 8, batch = null, models = null } = {}) {
-  // модели: переданные, иначе список для сравнения из настроек, иначе основная модель агента
-  const list = models?.length ? models : agent.compareModels().length ? agent.compareModels() : [null];
+/**
+ * Конфигурации для прогона: [{versionId, model}]. Переданные, иначе из настроек compare_configs,
+ * иначе список моделей compare_models с правилами из настроек, иначе основная модель.
+ */
+function resolveConfigs({ configs, models } = {}) {
+  if (configs?.length) return configs;
+  if (models?.length) return models.map((model) => ({ versionId: null, model }));
+  try {
+    const saved = JSON.parse(getSetting('compare_configs') || '[]');
+    if (Array.isArray(saved) && saved.length) return saved;
+  } catch { /* ignore */ }
+  const cm = agent.compareModels();
+  return cm.length ? cm.map((model) => ({ versionId: null, model })) : [{ versionId: null, model: null }];
+}
+
+/** Сгенерировать ответы агента на каждую реплику клиента, не отправляя их. Прежние ответы не удаляются. */
+async function replayChat(chatId, { maxTurns = 8, batch = null, models = null, configs = null } = {}) {
+  const list = resolveConfigs({ configs, models });
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat) throw new Error('Чат не найден');
   const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(chatId);
   const points = replyPoints(messages).slice(0, maxTurns);
-  // старые неоценённые прогоны заменяем свежими; оценённые оставляем для истории
-  db.prepare("DELETE FROM agent_runs WHERE chat_id = ? AND kind = 'replay' AND rating IS NULL AND correction IS NULL").run(chatId);
   let tokens = 0;
   let errors = 0;
   for (const p of points) {
     const idx = messages.indexOf(p);
     const history = messages.slice(0, idx + 1);
-    const clientText = history.filter((m) => m.source === 'client').map((m) => m.text).join('\n');
     const ctx = {
       item: chat.item_title || chat.item_id ? { id: chat.item_id, title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
-      phone: agent.extractPhone(clientText),
+      phone: chatstate.findPhone(history)?.phone || null,
       history,
     };
-    // все модели отвечают на одно и то же сообщение одновременно
-    const results = await Promise.allSettled(list.map((model) => agent.generateReply(ctx, { model })));
+    // все конфигурации отвечают на одно и то же сообщение одновременно
+    const results = await Promise.allSettled(list.map((c) => agent.generateReply(ctx, { model: c.model || undefined, versionId: c.versionId || null })));
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') {
         tokens += r.value.usage?.total_tokens || 0;
         engine.saveRun(chatId, 'replay', p, r.value, { batch });
       } else {
         errors++;
-        engine.saveRun(chatId, 'replay', p, { model: list[i] || undefined, reply: '' }, { batch, comment: 'Ошибка: ' + r.reason.message.slice(0, 300) });
+        engine.saveRun(chatId, 'replay', p, { model: list[i].model || getSetting('openai_model'), reply: '' },
+          { batch, versionId: list[i].versionId || null, comment: 'Ошибка: ' + r.reason.message.slice(0, 300) });
       }
     });
     if (errors && errors === results.length * (points.indexOf(p) + 1)) throw new Error(results[0].reason.message);
   }
-  return { turns: points.length, tokens, models: list.filter(Boolean), errors };
+  return { turns: points.length, tokens, configs: list.map((c) => agent.configLabel(agent.getVersion(c.versionId), c.model)), models: list.map((c) => c.model).filter(Boolean), errors };
 }
 
 function pickChats({ count = 10, onlyWithSeller = true, onlyLeads = false, order = 'recent', exclude = '' } = {}) {
@@ -310,7 +372,7 @@ function replayBatch(opts = {}) {
     for (const id of ids) {
       if (job.stop) break;
       try {
-        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch, models: opts.models });
+        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch, models: opts.models, configs: opts.configs });
         job.tokens += r.tokens;
       } catch (e) {
         job.errors++;
@@ -376,6 +438,6 @@ function reviewBatch(opts = {}) {
 }
 
 module.exports = {
-  jobState, stopJob, importHistory, managerStats, exportJsonl, replayChat, replayBatch, replyPoints,
+  jobState, stopJob, startJob, importHistory, managerStats, recountLeads, exportJsonl, replayChat, replayBatch, replyPoints,
   reviewChat, reviewBatch, buildReport,
 };

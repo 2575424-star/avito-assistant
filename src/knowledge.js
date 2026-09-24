@@ -34,7 +34,8 @@ function score(entryStems, query) {
  */
 function selectKb(queryText) {
   const budget = Number(getSetting('kb_budget_chars') || 16000);
-  const rows = db.prepare('SELECT * FROM kb WHERE enabled = 1 ORDER BY category, id').all();
+  // в промпт идут только утверждённые записи; кандидаты из разбора чатов ждут проверки человеком
+  const rows = db.prepare("SELECT * FROM kb WHERE enabled = 1 AND COALESCE(status, 'approved') = 'approved' ORDER BY category, id").all();
   const size = (r) => (r.title || '').length + r.content.length + 20;
   const total = rows.reduce((a, r) => a + size(r), 0);
   if (total <= budget) return rows;

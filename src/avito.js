@@ -63,7 +63,7 @@ function retryDelayMs(res, attempt) {
   return Math.min(2000 * 2 ** attempt, 30_000);
 }
 
-async function request(method, path, { query, json, attempt = 0 } = {}) {
+async function request(method, path, { query, json, headers = {}, attempt = 0 } = {}) {
   const token = await getToken();
   const url = new URL(BASE + path);
   if (query) for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null) url.searchParams.set(k, v);
@@ -72,18 +72,19 @@ async function request(method, path, { query, json, attempt = 0 } = {}) {
     headers: {
       Authorization: 'Bearer ' + token,
       ...(json ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     },
     body: json ? JSON.stringify(json) : undefined,
   });
   if (res.status === 401 && attempt === 0) {
     await getToken(true);
-    return request(method, path, { query, json, attempt: 1 });
+    return request(method, path, { query, json, headers, attempt: 1 });
   }
   // лимит запросов и сбои Авито: ждём (по Retry-After, если есть) и повторяем, не больше 3 раз.
   // POST при 5xx не повторяем: сообщение могло уже уйти, повтор отправил бы его дважды.
   if ((res.status === 429 || (res.status >= 500 && method === 'GET')) && attempt < 3) {
     await sleep(retryDelayMs(res, attempt));
-    return request(method, path, { query, json, attempt: attempt + 1 });
+    return request(method, path, { query, json, headers, attempt: attempt + 1 });
   }
   const text = await res.text();
   let data;
@@ -198,6 +199,40 @@ async function avitoIdsByAdIds(adIds) {
   return out;
 }
 
+// ---------- Целевые действия (CPA): фактические списания, только чтение ----------
+const CPA_HEADERS = { 'X-Source': 'avito-assistant' };
+
+/** Целевые (платные) чаты с даты: чат, сообщение-триггер, тип, цена. Лимит Авито — 40 запросов в минуту. */
+async function cpaChats(dateFrom, { maxPages = 100 } = {}) {
+  const out = [];
+  for (let offset = 0, page = 0; page < maxPages; page++, offset += 100) {
+    const data = await request('POST', '/cpa/v2/chatsByTime', { json: { dateTimeFrom: dateFrom, limit: 100, offset }, headers: CPA_HEADERS });
+    const list = data.chats || [];
+    out.push(...list);
+    if (list.length < 100) break;
+    await sleep(1600);
+  }
+  return out;
+}
+
+/** Целевые звонки с даты. Лимит Авито — 1 запрос в минуту. */
+async function cpaCalls(dateFrom, { maxPages = 20, onWait } = {}) {
+  const out = [];
+  for (let offset = 0, page = 0; page < maxPages; page++, offset += 100) {
+    const data = await request('POST', '/cpa/v2/callsByTime', { json: { dateTimeFrom: dateFrom, limit: 100, offset }, headers: CPA_HEADERS });
+    const list = data.calls || [];
+    out.push(...list);
+    if (list.length < 100) break;
+    if (onWait) onWait(out.length);
+    await sleep(61_000);
+  }
+  return out;
+}
+
+async function cpaBalance() {
+  return request('POST', '/cpa/v3/balanceInfo', { json: {}, headers: CPA_HEADERS });
+}
+
 function resetCache() {
   tokenCache = { token: null, expiresAt: 0, key: '' };
 }
@@ -205,5 +240,5 @@ function resetCache() {
 module.exports = {
   AvitoError, isConfigured, getToken, tokenInfo, getSelf, userId, getChats, getChat, getMessages,
   sendMessage, markRead, subscribeWebhook, unsubscribeWebhook, listSubscriptions, resetCache,
-  getItems, getAutoloadProfile, avitoIdsByAdIds, sendingEnabled,
+  getItems, getAutoloadProfile, avitoIdsByAdIds, sendingEnabled, cpaChats, cpaCalls, cpaBalance,
 };
