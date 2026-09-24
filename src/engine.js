@@ -100,13 +100,14 @@ function storeMessages(chatId, apiMessages, uid) {
 }
 
 // ---------- Лиды ----------
-function markLead(chatId, phone, how = 'чат') {
+function markLead(chatId, phone, how = 'чат', { at = now(), silent = false } = {}) {
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat || chat.phone) return false;
   const first = db.prepare('SELECT direction, source FROM messages WHERE chat_id = ? ORDER BY created ASC LIMIT 1').get(chatId);
   const channel = first && first.direction === 'out' ? 'Исходящий' : 'Входящий';
   db.prepare("UPDATE chats SET phone = ?, lead_at = ?, lead_channel = ?, status = CASE WHEN status = 'manager' THEN status ELSE 'lead' END WHERE id = ?")
-    .run(phone, now(), channel, chatId);
+    .run(phone, at, channel, chatId);
+  if (silent) return true; // загрузка истории: без журнала и уведомлений
   logEvent('lead', `Контакт ${phone} (${how})`, chatId);
   notify(`✅ Новый контакт с Авито\n${chat.client_name || 'Клиент'}: ${phone}\n${chat.item_title || 'Личный чат'}${chat.item_price ? ' — ' + chat.item_price : ''}\nhttps://www.avito.ru/profile/messenger/channel/${chatId}`);
   return true;
@@ -146,7 +147,9 @@ function afterNewMessages(chatId, fresh) {
   for (const m of fresh) {
     if (m.source === 'client') {
       const phone = agent.extractPhone(m.text);
-      if (phone) markLead(chatId, phone, 'из сообщения клиента');
+      // старые сообщения (первая синхронизация) фиксируем датой сообщения и без уведомлений
+      const old = (m.created || now()) < now() - 3600;
+      if (phone) markLead(chatId, phone, 'из сообщения клиента', old ? { at: m.created, silent: true } : {});
       if (m.created >= startedAt) schedule = true;
     }
     if (m.source === 'system') {
@@ -228,8 +231,8 @@ function scheduleReply(chatId, delaySec) {
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat || !chat.ai_enabled || chat.status === 'manager') return;
 
-  // быстрый ответ — один раз, до ответа ИИ
-  if (getSetting('quick_reply_enabled') === '1' && !chat.quick_sent && getSetting('quick_reply_text').trim()) {
+  // быстрый ответ — один раз, до ответа ИИ (в тестовом режиме не отправляется)
+  if (avito.sendingEnabled() && getSetting('quick_reply_enabled') === '1' && !chat.quick_sent && getSetting('quick_reply_text').trim()) {
     const hasOut = db.prepare("SELECT 1 FROM messages WHERE chat_id = ? AND direction = 'out' LIMIT 1").get(chatId);
     const lastIn = db.prepare("SELECT source FROM messages WHERE chat_id = ? ORDER BY created DESC LIMIT 1").get(chatId);
     if (!hasOut && lastIn?.source === 'client' && canAnswerChat(chat)) {
@@ -305,6 +308,10 @@ async function processChat(chatId, opts = {}) {
     if (last.source === 'system') {
       const t = findTemplate(chatId, last);
       if (!t) return { skipped: 'системное сообщение без шаблона' };
+      if (!avito.sendingEnabled()) {
+        saveRun(chatId, 'shadow', last, { reply: t.reply }, { comment: `шаблон #${t.id}` });
+        return { draft: t.reply, template: t.id };
+      }
       await sendAndStore(chatId, t.reply, 'template');
       db.prepare('INSERT OR IGNORE INTO template_log(chat_id, template_id) VALUES(?,?)').run(chatId, t.id);
       db.prepare('UPDATE templates SET hits = hits + 1 WHERE id = ?').run(t.id);
@@ -319,7 +326,7 @@ async function processChat(chatId, opts = {}) {
     }
 
     const result = await agent.generateReply({
-      item: chat.item_title ? { title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
+      item: chat.item_title || chat.item_id ? { id: chat.item_id, title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
       phone: chat.phone,
       history,
     });
@@ -340,6 +347,14 @@ async function processChat(chatId, opts = {}) {
       return { skipped: 'пришло новое сообщение, ответ пересобирается' };
     }
 
+    // тестовый режим: ответ не уходит в Авито, а сохраняется черновиком рядом с сообщением клиента
+    if (!avito.sendingEnabled()) {
+      const lastClient = [...history].reverse().find((m) => m.direction === 'in' && m.source !== 'system') || last;
+      saveRun(chatId, 'shadow', lastClient, result);
+      logEvent('agent', `Черновик ответа (тестовый режим, ${result.usage?.total_tokens || '?'} ток.)`, chatId);
+      return { draft: result.reply, phone: result.phone, handoff: result.handoff };
+    }
+
     await sendAndStore(chatId, result.reply, 'bot');
     db.prepare("UPDATE chats SET bot_replies = bot_replies + 1, status = CASE WHEN status = 'new' THEN 'active' ELSE status END WHERE id = ?").run(chatId);
     try { await avito.markRead(chatId); } catch { /* не критично */ }
@@ -356,6 +371,25 @@ async function processChat(chatId, opts = {}) {
   }
 }
 
+/** Сохранить ответ агента, который не отправлялся (теневой режим или прогон по истории). */
+function saveRun(chatId, kind, atMsg, result, extra = {}) {
+  // текст клиента: все его сообщения подряд до at-сообщения
+  const msgs = db.prepare('SELECT * FROM messages WHERE chat_id = ? AND created <= ? ORDER BY created ASC, rowid ASC').all(chatId, atMsg.created);
+  const block = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.source === 'system') continue;
+    if (m.direction !== 'in') break;
+    block.unshift(m.text);
+  }
+  const r = db.prepare(`INSERT INTO agent_runs(chat_id, kind, at_message_id, at_created, client_text, reply, phone, handoff, skip, model, tokens, batch, comment, created)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    chatId, kind, atMsg.id, atMsg.created, block.join('\n') || atMsg.text || '', result.reply || '', result.phone || null,
+    result.handoff ? 1 : 0, result.skip ? 1 : 0, result.model || null, result.usage?.total_tokens || null, extra.batch || null, extra.comment || null, now(),
+  );
+  return Number(r.lastInsertRowid);
+}
+
 function enableAI(on) {
   setSetting('ai_enabled', on ? '1' : '0');
   if (on) setSetting('ai_started_at', String(now()));
@@ -364,5 +398,6 @@ function enableAI(on) {
 
 module.exports = {
   pollOnce, startPolling, syncChat, processChat, scheduleReply, sendAndStore, markLead, notify, enableAI,
+  saveRun, storeMessages, upsertChat: (c, uid) => upsertChatStmt.run({ ...chatFromApi(c, uid), synced_at: now() }),
   getLastPoll: () => lastPoll,
 };

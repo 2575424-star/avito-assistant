@@ -55,7 +55,15 @@ function tokenInfo() {
   return { hasToken: Boolean(tokenCache.token), expiresAt: tokenCache.expiresAt ? Math.floor(tokenCache.expiresAt / 1000) : null };
 }
 
-async function request(method, path, { query, json, retry = true } = {}) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function retryDelayMs(res, attempt) {
+  const h = Number(res.headers.get('retry-after') || res.headers.get('x-ratelimit-retry-after'));
+  if (h > 0) return Math.min(h, 60) * 1000;
+  return Math.min(2000 * 2 ** attempt, 30_000);
+}
+
+async function request(method, path, { query, json, attempt = 0 } = {}) {
   const token = await getToken();
   const url = new URL(BASE + path);
   if (query) for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null) url.searchParams.set(k, v);
@@ -67,13 +75,15 @@ async function request(method, path, { query, json, retry = true } = {}) {
     },
     body: json ? JSON.stringify(json) : undefined,
   });
-  if (res.status === 401 && retry) {
+  if (res.status === 401 && attempt === 0) {
     await getToken(true);
-    return request(method, path, { query, json, retry: false });
+    return request(method, path, { query, json, attempt: 1 });
   }
-  if (res.status === 429 && retry) {
-    await new Promise((r) => setTimeout(r, 2000));
-    return request(method, path, { query, json, retry: false });
+  // лимит запросов и сбои Авито: ждём (по Retry-After, если есть) и повторяем, не больше 3 раз.
+  // POST при 5xx не повторяем: сообщение могло уже уйти, повтор отправил бы его дважды.
+  if ((res.status === 429 || (res.status >= 500 && method === 'GET')) && attempt < 3) {
+    await sleep(retryDelayMs(res, attempt));
+    return request(method, path, { query, json, attempt: attempt + 1 });
   }
   const text = await res.text();
   let data;
@@ -83,6 +93,14 @@ async function request(method, path, { query, json, retry = true } = {}) {
     throw new AvitoError(`Avito ${method} ${path} → ${res.status}: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`, res.status, data);
   }
   return data;
+}
+
+// Тестовый режим: всё, что меняет что-то в Авито (отправка, «прочитано»), запрещено.
+function sendingEnabled() {
+  return getSetting('send_enabled') === '1';
+}
+function assertSending(what) {
+  if (!sendingEnabled()) throw new AvitoError(`Тестовый режим: ${what} в Авито выключено (Настройки → Агент → «Боевой режим»)`, 0);
 }
 
 async function getSelf() {
@@ -101,10 +119,10 @@ async function userId() {
   return id;
 }
 
-async function getChats({ limit = 100, offset = 0, unreadOnly = false, chatTypes = 'u2i,u2u' } = {}) {
+async function getChats({ limit = 100, offset = 0, unreadOnly = false, chatTypes = 'u2i,u2u', itemIds } = {}) {
   const uid = await userId();
   const data = await request('GET', `/messenger/v2/accounts/${uid}/chats`, {
-    query: { limit, offset, unread_only: unreadOnly ? 'true' : undefined, chat_types: chatTypes },
+    query: { limit, offset, unread_only: unreadOnly ? 'true' : undefined, chat_types: chatTypes, item_ids: itemIds },
   });
   return data.chats || [];
 }
@@ -123,6 +141,7 @@ async function getMessages(chatId, { limit = 100, offset = 0 } = {}) {
 }
 
 async function sendMessage(chatId, text) {
+  assertSending('отправка сообщений');
   const uid = await userId();
   return request('POST', `/messenger/v1/accounts/${uid}/chats/${encodeURIComponent(chatId)}/messages`, {
     json: { message: { text: String(text).slice(0, 1000) }, type: 'text' },
@@ -130,6 +149,7 @@ async function sendMessage(chatId, text) {
 }
 
 async function markRead(chatId) {
+  assertSending('отметка «прочитано»');
   const uid = await userId();
   return request('POST', `/messenger/v1/accounts/${uid}/chats/${encodeURIComponent(chatId)}/read`);
 }
@@ -146,6 +166,38 @@ async function listSubscriptions() {
   return request('POST', '/messenger/v1/subscriptions');
 }
 
+// ---------- Объявления и автозагрузка (для базы знаний) ----------
+
+/** Все объявления кабинета: GET /core/v1/items (постранично). */
+async function getItems({ statuses = 'active,old,removed,blocked,rejected', perPage = 50, maxPages = 200 } = {}) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const data = await request('GET', '/core/v1/items', { query: { per_page: perPage, page, status: statuses } });
+    const list = data.resources || [];
+    out.push(...list);
+    if (list.length < perPage) break;
+    await sleep(150);
+  }
+  return out;
+}
+
+/** Профиль автозагрузки: там URL XML-фида с автомобилями. */
+async function getAutoloadProfile() {
+  return request('GET', '/autoload/v2/profile');
+}
+
+/** Сопоставить Id из фида с ID объявлений на Авито. */
+async function avitoIdsByAdIds(adIds) {
+  const out = {};
+  for (let i = 0; i < adIds.length; i += 50) {
+    const chunk = adIds.slice(i, i + 50);
+    const data = await request('GET', '/autoload/v2/items/avito_ids', { query: { query: chunk.join(',') } });
+    for (const it of data.items || []) if (it.avito_id) out[it.ad_id] = it.avito_id;
+    await sleep(150);
+  }
+  return out;
+}
+
 function resetCache() {
   tokenCache = { token: null, expiresAt: 0, key: '' };
 }
@@ -153,4 +205,5 @@ function resetCache() {
 module.exports = {
   AvitoError, isConfigured, getToken, tokenInfo, getSelf, userId, getChats, getChat, getMessages,
   sendMessage, markRead, subscribeWebhook, unsubscribeWebhook, listSubscriptions, resetCache,
+  getItems, getAutoloadProfile, avitoIdsByAdIds, sendingEnabled,
 };

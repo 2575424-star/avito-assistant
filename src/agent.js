@@ -1,5 +1,6 @@
 // Агент: собирает промпт из правил + данных объявления + истории и получает ответ от OpenAI.
 const { getSetting } = require('./db');
+const knowledge = require('./knowledge');
 
 const OPENAI_BASE = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
 
@@ -34,7 +35,14 @@ function buildSystemPrompt(ctx = {}) {
   parts.push('ПРАВИЛА ОТВЕТА:\n' + rules);
   if (company) parts.push('ИНФОРМАЦИЯ О КОМПАНИИ:\n' + company);
 
-  if (ctx.item && ctx.item.title) {
+  // карточка автомобиля: полная из базы (фид / API), иначе то, что пришло в контексте чата
+  const stored = ctx.item?.id ? knowledge.getItem(ctx.item.id) : null;
+  if (stored) {
+    parts.push('ОБЪЯВЛЕНИЕ, ПО КОТОРОМУ ПИШЕТ КЛИЕНТ:\n' + knowledge.itemCard(stored));
+    if (stored.status && stored.status !== 'active') {
+      parts.push('ВНИМАНИЕ: это объявление снято с продажи — не обещай наличие, предложи подобрать похожий вариант из списка ниже.');
+    }
+  } else if (ctx.item && ctx.item.title) {
     const it = ctx.item;
     const lines = [`Название: ${it.title}`];
     if (it.price) lines.push(`Цена в объявлении: ${it.price}`);
@@ -44,6 +52,13 @@ function buildSystemPrompt(ctx = {}) {
   } else {
     parts.push('Это личный чат без привязки к объявлению — отвечай по информации о компании.');
   }
+
+  const kb = knowledge.kbPromptSections(ctx.queryText || '');
+  if (kb.text) parts.push(kb.text);
+
+  const stock = knowledge.stockList(stored?.key);
+  if (stock) parts.push('ДРУГИЕ АВТОМОБИЛИ В ПРОДАЖЕ (для подбора альтернативы; подробности уточнит менеджер):\n' + stock);
+
   if (ctx.phone) parts.push(`Клиент уже оставил телефон: ${ctx.phone}. Повторно номер не проси.`);
   if (ctx.alreadyGreeted) parts.push('Ты уже здоровался в этом чате — не здоровайся повторно.');
 
@@ -72,11 +87,11 @@ function historyToMessages(history) {
   return out.slice(-40);
 }
 
-async function callOpenAI(messages) {
+async function callOpenAI(messages, opts = {}) {
   const key = getSetting('openai_api_key');
   if (!key) throw new Error('Не задан ключ OpenAI (OPENAI_API_KEY)');
-  const model = getSetting('openai_model') || 'gpt-4o-mini';
-  const temperature = Number(getSetting('temperature') || 0.5);
+  const model = opts.model || getSetting('openai_model') || 'gpt-4o-mini';
+  const temperature = opts.temperature ?? Number(getSetting('temperature') || 0.5);
   const body = { model, messages, response_format: { type: 'json_object' } };
   // у reasoning-моделей (o*, gpt-5*) temperature не настраивается
   if (!/^(o\d|gpt-5)/.test(model)) body.temperature = temperature;
@@ -115,7 +130,9 @@ function parseAgentJson(content) {
  */
 async function generateReply(ctx) {
   const alreadyGreeted = (ctx.history || []).some((m) => m.direction === 'out' && /здравствуйте|добрый (день|вечер)|привет/i.test(m.text || ''));
-  const system = buildSystemPrompt({ ...ctx, alreadyGreeted });
+  // последние сообщения клиента — по ним ищем нужные записи в базе знаний
+  const queryText = (ctx.history || []).filter((m) => m.direction === 'in' && m.source !== 'system').slice(-3).map((m) => m.text).join('\n');
+  const system = buildSystemPrompt({ ...ctx, alreadyGreeted, queryText });
   const messages = [{ role: 'system', content: system }, ...historyToMessages(ctx.history || [])];
   const { content, usage, model } = await callOpenAI(messages);
   const parsed = parseAgentJson(content);
@@ -127,4 +144,76 @@ async function generateReply(ctx) {
   return { ...parsed, phone, usage, model, systemPrompt: system };
 }
 
-module.exports = { generateReply, extractPhone, normalizePhone, buildSystemPrompt };
+// ---------- Разбор переписок менеджеров ----------
+const ROLE_RU = { client: 'Клиент', manager: 'Продавец', bot: 'Продавец (бот)', quick: 'Продавец (быстрый ответ)', template: 'Продавец (шаблон)', system: 'Авито' };
+
+function transcript(messages, maxChars = 9000) {
+  const lines = [];
+  let prev = null;
+  for (const m of messages) {
+    if (!m.text) continue;
+    const t = new Date(m.created * 1000).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const gap = prev ? m.created - prev : 0;
+    const gapTxt = gap >= 600 ? ` (через ${gap >= 86400 ? Math.round(gap / 86400) + ' дн' : gap >= 3600 ? Math.round(gap / 3600) + ' ч' : Math.round(gap / 60) + ' мин'})` : '';
+    lines.push(`[${t}${gapTxt}] ${ROLE_RU[m.source] || (m.direction === 'in' ? 'Клиент' : 'Продавец')}: ${m.text}`);
+    prev = m.created;
+  }
+  let text = lines.join('\n');
+  if (text.length > maxChars) text = text.slice(0, maxChars / 3) + '\n…\n' + text.slice(-maxChars * 2 / 3);
+  return text;
+}
+
+async function analyzeChat({ chat, messages }) {
+  const company = getSetting('company_info');
+  const system = `Ты — руководитель отдела продаж автосалона. Разбираешь переписку продавца с покупателем в чате Авито.
+Цель продавца — вежливо и быстро ответить на вопрос и получить номер телефона покупателя, чтобы менеджер перезвонил.
+${company ? 'Информация о компании:\n' + company + '\n' : ''}
+Верни строго JSON:
+{"summary": "1–2 предложения: что хотел клиент и чем закончилось",
+ "questions": ["вопросы клиента, коротко, в общем виде: «есть ли кредит», «какой пробег»"],
+ "outcome": "phone" (клиент оставил телефон) | "call" (договорились созвониться/приехать без телефона в чате) | "lost" (клиент перестал отвечать или ушёл) | "no_answer" (продавец не ответил) | "other",
+ "score": 1–10 — оценка работы продавца,
+ "speed": "оценка скорости ответов продавца одной фразой",
+ "mistakes": ["конкретные ошибки продавца: не ответил на вопрос, не попросил телефон, ответил через сутки, грубость, выдумал условия…"],
+ "good": ["что продавец сделал хорошо"],
+ "better_reply": {"client": "ключевое сообщение клиента, на котором продавец ошибся", "reply": "как надо было ответить"} или null,
+ "faq": [{"q": "общий вопрос клиента", "a": "ответ продавца, если в нём есть полезные факты о компании/условиях, которые можно переиспользовать"}]}
+В faq включай только факты, а не персональные детали этого клиента. Пиши по-русски.`;
+  const item = chat.item_title ? `Объявление: ${chat.item_title}${chat.item_price ? ', ' + chat.item_price : ''}\n\n` : 'Личный чат без объявления\n\n';
+  const { content, usage, model } = await callOpenAI(
+    [{ role: 'system', content: system }, { role: 'user', content: item + 'Переписка:\n' + transcript(messages) }],
+    { model: getSetting('analysis_model') || undefined, temperature: 0.2 },
+  );
+  let obj = {};
+  try { obj = JSON.parse(content); } catch { const mm = content.match(/\{[\s\S]*\}/); try { obj = mm ? JSON.parse(mm[0]) : {}; } catch { obj = {}; } }
+  return { result: obj, usage, model };
+}
+
+async function summarizeReviews(reviews) {
+  const lines = reviews.map((r, i) => {
+    const x = r.result;
+    return `#${i + 1} [оценка ${x.score ?? '?'}; итог ${x.outcome || '?'}] ${x.summary || ''}
+Вопросы: ${(x.questions || []).join('; ')}
+Ошибки: ${(x.mistakes || []).join('; ')}
+Хорошо: ${(x.good || []).join('; ')}
+FAQ: ${(x.faq || []).map((f) => f.q + ' → ' + f.a).join(' | ')}`;
+  }).join('\n\n');
+  const system = `Ты — руководитель отдела продаж автосалона. Тебе дали разборы переписок продавцов с покупателями на Авито.
+Составь сводный отчёт для настройки ИИ-консультанта, который будет отвечать вместо продавцов. Верни строго JSON:
+{"overview": "3–5 предложений: как в целом работают продавцы, главные проблемы",
+ "top_questions": [{"question": "частый вопрос клиентов", "count": число разборов, где встречался}],
+ "mistakes": [{"mistake": "типичная ошибка", "count": число, "fix": "как должен действовать ИИ-консультант"}],
+ "good_practices": ["удачные приёмы продавцов, которые стоит перенять"],
+ "rules": "текст дополнительных правил для промпта ИИ-консультанта (список, 5–12 пунктов)",
+ "faq": [{"q": "вопрос", "a": "ответ по фактам из переписок"}]}
+Сортируй по частоте. В faq — только проверенные факты из переписок, без выдумок. Пиши по-русски.`;
+  const { content, usage, model } = await callOpenAI(
+    [{ role: 'system', content: system }, { role: 'user', content: `Разборов: ${reviews.length}\n\n${lines}`.slice(0, 60000) }],
+    { model: getSetting('analysis_model') || undefined, temperature: 0.2 },
+  );
+  let obj = {};
+  try { obj = JSON.parse(content); } catch { obj = {}; }
+  return { result: obj, usage, model };
+}
+
+module.exports = { generateReply, extractPhone, normalizePhone, buildSystemPrompt, analyzeChat, summarizeReviews, transcript };

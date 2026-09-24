@@ -7,6 +7,8 @@ const { db, getSetting, setSetting, allSettings, logEvent } = require('./db');
 const avito = require('./avito');
 const agent = require('./agent');
 const engine = require('./engine');
+const knowledge = require('./knowledge');
+const history = require('./history');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -122,6 +124,7 @@ async function api(req, res, url) {
       webhookUrl: webhookUrl(),
       publicUrl: publicUrl(),
       passwordSet: Boolean(SESSION),
+      sendEnabled: avito.sendingEnabled(),
       stats: {
         chats: db.prepare('SELECT COUNT(*) c FROM chats').get().c,
         leads: db.prepare('SELECT COUNT(*) c FROM chats WHERE phone IS NOT NULL').get().c,
@@ -175,11 +178,15 @@ async function api(req, res, url) {
     if (!action && m === 'GET') {
       const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(id);
       const events = db.prepare('SELECT * FROM events WHERE chat_id = ? ORDER BY id DESC LIMIT 30').all(id);
-      return send(res, 200, { chat, messages, events });
+      const runs = db.prepare('SELECT * FROM agent_runs WHERE chat_id = ? ORDER BY id ASC').all(id);
+      const reviewRow = db.prepare('SELECT * FROM chat_reviews WHERE chat_id = ?').get(id);
+      const review = reviewRow ? { ...reviewRow, result: JSON.parse(reviewRow.result || '{}') } : null;
+      return send(res, 200, { chat, messages, events, runs, review, sendEnabled: avito.sendingEnabled() });
     }
     if (action === '/send' && m === 'POST') {
       const b = await readBody(req);
       if (!b.text?.trim()) return send(res, 400, { error: 'Пустое сообщение' });
+      if (!avito.sendingEnabled()) return send(res, 400, { error: 'Тестовый режим: отправка в Авито выключена' });
       await engine.sendAndStore(id, b.text.trim(), 'manager');
       if (b.pauseBot !== false) db.prepare("UPDATE chats SET status = 'manager' WHERE id = ?").run(id);
       return send(res, 200, { ok: true });
@@ -199,6 +206,15 @@ async function api(req, res, url) {
     if (action === '/reply-now' && m === 'POST') {
       const r = await engine.processChat(id, { force: true });
       return send(res, 200, r);
+    }
+    if (action === '/replay' && m === 'POST') {
+      const b = await readBody(req);
+      try {
+        return send(res, 200, await history.replayChat(id, { maxTurns: Math.min(20, Number(b.maxTurns) || 8) }));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (action === '/review' && m === 'POST') {
+      try { return send(res, 200, await history.reviewChat(id)); } catch (e) { return send(res, 400, { error: e.message }); }
     }
     if (action === '/sync' && m === 'POST') {
       const n = await engine.syncChat(id);
@@ -293,12 +309,168 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
+
+  // ----- фоновые задачи -----
+  if (p === '/api/jobs') {
+    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review') });
+  }
+  mm = p.match(/^\/api\/jobs\/(import|replay|review)\/stop$/);
+  if (mm && m === 'POST') { history.stopJob(mm[1]); return send(res, 200, { ok: true }); }
+
+  // ----- архив и аналитика менеджеров -----
+  if (p === '/api/archive/import' && m === 'POST') {
+    const b = await readBody(req);
+    if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
+    try { return send(res, 200, history.importHistory({ maxChats: Number(b.maxChats) || 100000 })); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/archive/stats') {
+    const { from, to } = periodFromQuery(q);
+    return send(res, 200, history.managerStats(q.get('from') ? from : 0, to));
+  }
+  if (p === '/api/archive/export.jsonl') {
+    const { from, to } = periodFromQuery(q);
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Content-Disposition': 'attachment; filename="avito-chats.jsonl"' });
+    for (const line of history.exportJsonl(q.get('from') ? from : 0, to)) res.write(line);
+    return res.end();
+  }
+  if (p === '/api/archive/review' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      return send(res, 200, history.reviewBatch({ count: Math.min(200, Number(b.count) || 20), order: b.order, onlyLeads: Boolean(b.onlyLeads), onlyWithSeller: b.onlyWithSeller !== false }));
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/archive/report' && m === 'POST') {
+    try { return send(res, 200, await history.buildReport()); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/archive/reports') {
+    const r = db.prepare('SELECT * FROM reports ORDER BY id DESC LIMIT 1').get();
+    const reviews = db.prepare(`SELECT r.chat_id, r.score, r.outcome, r.result, r.created, c.client_name, c.item_title, c.phone
+      FROM chat_reviews r LEFT JOIN chats c ON c.id = r.chat_id ORDER BY r.created DESC LIMIT 300`).all()
+      .map((x) => { const res = JSON.parse(x.result || '{}'); return { ...x, result: undefined, summary: res.summary, mistakes: res.mistakes || [] }; });
+    return send(res, 200, { report: r ? { ...r, result: JSON.parse(r.result || '{}') } : null, reviews });
+  }
+
+  // ----- прогон агента по реальным чатам и оценка ответов -----
+  if (p === '/api/replay-batch' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      return send(res, 200, history.replayBatch({
+        count: Math.min(100, Number(b.count) || 10), maxTurns: Math.min(10, Number(b.maxTurns) || 3),
+        order: b.order, onlyLeads: Boolean(b.onlyLeads), skipDone: b.skipDone !== false,
+      }));
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/runs' && m === 'GET') {
+    const where = [];
+    switch (q.get('filter')) {
+      case 'unrated': where.push('r.rating IS NULL'); break;
+      case 'good': where.push('r.rating = 1'); break;
+      case 'bad': where.push('r.rating = -1'); break;
+      case 'shadow': where.push("r.kind = 'shadow'"); break;
+      case 'replay': where.push("r.kind = 'replay'"); break;
+    }
+    const sqlWhere = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const limit = Math.min(300, Number(q.get('limit') || 100));
+    const rows = db.prepare(`SELECT r.*, c.client_name, c.item_title, c.item_price FROM agent_runs r LEFT JOIN chats c ON c.id = r.chat_id ${sqlWhere} ORDER BY r.id DESC LIMIT ?`).all(limit);
+    const nextOut = db.prepare("SELECT direction, source, text FROM messages WHERE chat_id = ? AND created > ? AND source != 'system' ORDER BY created ASC, rowid ASC LIMIT 6");
+    for (const r of rows) {
+      const after = nextOut.all(r.chat_id, r.at_created);
+      const out = [];
+      for (const x of after) { if (x.direction === 'in') break; out.push(x.text); }
+      r.actual = out.join('\n');
+    }
+    const stats = db.prepare(`SELECT COUNT(*) total, SUM(rating = 1) good, SUM(rating = -1) bad, SUM(rating IS NULL) unrated,
+      SUM(kind = 'shadow') shadow, SUM(kind = 'replay') replay, SUM(tokens) tokens FROM agent_runs`).get();
+    return send(res, 200, { runs: rows, stats });
+  }
+  mm = p.match(/^\/api\/runs\/(\d+)$/);
+  if (mm && m === 'POST') {
+    const b = await readBody(req);
+    const run = db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(Number(mm[1]));
+    if (!run) return send(res, 404, { error: 'Не найдено' });
+    if (b.rating !== undefined) db.prepare('UPDATE agent_runs SET rating = ? WHERE id = ?').run(b.rating === null ? null : Number(b.rating) > 0 ? 1 : -1, run.id);
+    if (b.correction !== undefined) db.prepare('UPDATE agent_runs SET correction = ? WHERE id = ?').run(b.correction || null, run.id);
+    if (b.comment !== undefined) db.prepare('UPDATE agent_runs SET comment = ? WHERE id = ?').run(b.comment || null, run.id);
+    let kbId = null;
+    if (b.addToKb && (b.correction || run.reply)) {
+      kbId = Number(db.prepare("INSERT INTO kb(category, title, content, enabled, source, created, updated) VALUES('example', ?, ?, 1, 'correction', ?, ?)")
+        .run((run.client_text || '').slice(0, 500), (b.correction || run.reply).trim(), now(), now()).lastInsertRowid);
+    }
+    return send(res, 200, { ok: true, kbId });
+  }
+  if (mm && m === 'DELETE') {
+    db.prepare('DELETE FROM agent_runs WHERE id = ?').run(Number(mm[1]));
+    return send(res, 200, { ok: true });
+  }
+
+  // ----- база знаний -----
+  if (p === '/api/kb' && m === 'GET') {
+    return send(res, 200, { entries: db.prepare('SELECT * FROM kb ORDER BY category, id DESC').all(), categories: knowledge.KB_CATEGORIES });
+  }
+  if (p === '/api/kb' && m === 'POST') {
+    const b = await readBody(req);
+    const list = Array.isArray(b.entries) ? b.entries : [b];
+    const ids = [];
+    for (const e of list) {
+      if (!e.content?.trim() || !knowledge.KB_CATEGORIES[e.category]) continue;
+      if (e.id) {
+        db.prepare('UPDATE kb SET category = ?, title = ?, content = ?, enabled = ?, updated = ? WHERE id = ?')
+          .run(e.category, e.title?.trim() || null, e.content.trim(), e.enabled === false || e.enabled === 0 ? 0 : 1, now(), e.id);
+        ids.push(e.id);
+      } else {
+        ids.push(Number(db.prepare('INSERT INTO kb(category, title, content, enabled, source, created, updated) VALUES(?,?,?,?,?,?,?)')
+          .run(e.category, e.title?.trim() || null, e.content.trim(), e.enabled === false ? 0 : 1, e.source || 'manual', now(), now()).lastInsertRowid));
+      }
+    }
+    if (!ids.length) return send(res, 400, { error: 'Нужен текст и категория' });
+    return send(res, 200, { ok: true, ids });
+  }
+  mm = p.match(/^\/api\/kb\/(\d+)$/);
+  if (mm && m === 'DELETE') {
+    db.prepare('DELETE FROM kb WHERE id = ?').run(Number(mm[1]));
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/rules/append' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.text?.trim()) return send(res, 400, { error: 'Пустой текст' });
+    setSetting('rules', getSetting('rules').trim() + '\n\n' + b.text.trim());
+    return send(res, 200, { ok: true });
+  }
+
+  // ----- автомобили (объявления) -----
+  if (p === '/api/items' && m === 'GET') {
+    const search = (q.get('q') || '').trim();
+    const args = [];
+    let where = '';
+    if (search) { where = 'WHERE title LIKE ? OR vin LIKE ? OR CAST(avito_id AS TEXT) LIKE ?'; args.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+    const rows = db.prepare(`SELECT key, avito_id, ad_id, title, price, url, status, vin, year, mileage, source, updated, length(description) desc_len,
+      (SELECT COUNT(*) FROM chats c WHERE c.item_id = items.avito_id) chats FROM items ${where} ORDER BY status = 'active' DESC, title LIMIT 500`).all(...args);
+    return send(res, 200, { items: rows, stats: knowledge.itemsStats(), feedUrl: getSetting('feed_url') });
+  }
+  if (p === '/api/items/import-api' && m === 'POST') {
+    try { return send(res, 200, await knowledge.importItemsFromApi()); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/items/import-feed' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      if (b.url !== undefined) setSetting('feed_url', b.url.trim());
+      return send(res, 200, await knowledge.importFeed(b.url?.trim() || undefined));
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  mm = p.match(/^\/api\/items\/([^/]+)$/);
+  if (mm && m === 'GET') {
+    const it = db.prepare('SELECT * FROM items WHERE key = ?').get(decodeURIComponent(mm[1]));
+    if (!it) return send(res, 404, { error: 'Не найдено' });
+    return send(res, 200, { item: it, card: knowledge.itemCard(it) });
+  }
+
   // ----- песочница -----
   if (p === '/api/sandbox' && m === 'POST') {
     const b = await readBody(req);
     try {
       const history = (b.history || []).map((x) => ({ direction: x.direction === 'out' ? 'out' : 'in', type: 'text', text: String(x.text || ''), source: x.direction === 'out' ? 'bot' : 'client' }));
-      const r = await agent.generateReply({ item: b.item?.title ? b.item : null, phone: null, history });
+      const item = b.item?.id ? { id: Number(b.item.id), title: b.item.title } : b.item?.title ? b.item : null;
+      const r = await agent.generateReply({ item, phone: null, history });
       return send(res, 200, r);
     } catch (e) {
       return send(res, 400, { error: e.message });

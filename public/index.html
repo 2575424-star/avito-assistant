@@ -35,6 +35,10 @@
         <div class="nav-title">Агент</div>
         <a href="#/settings/agent" data-nav="settings"><span class="ico">⚙</span>Настройки</a>
         <a href="#/settings/sandbox" data-nav="sandbox"><span class="ico">🧪</span>Тест агента</a>
+        <div class="nav-title">Обучение</div>
+        <a href="#/archive" data-nav="archive"><span class="ico">🗂</span>Архив и аналитика</a>
+        <a href="#/kb" data-nav="kb"><span class="ico">📚</span>База знаний</a>
+        <a href="#/review" data-nav="review"><span class="ico">✅</span>Проверка ответов</a>
       </nav>
       <div class="sidebar-foot">
         <div id="connState" class="conn"></div>
@@ -51,6 +55,8 @@
             <div class="muted small" id="accSub">не подключён</div>
           </div>
         </div>
+        <span class="spacer"></span>
+        <a href="#/settings/agent" id="modeBadge" class="badge orange hidden" title="Ответы ИИ сохраняются черновиками, в Авито ничего не отправляется">🧪 Тестовый режим — в Авито ничего не отправляется</a>
         <div class="ai-switch">
           <span class="small muted">AI</span>
           <label class="switch"><input type="checkbox" id="aiGlobal"><span></span></label>
@@ -61,6 +67,9 @@
         <a href="#/dashboard" data-tab="dashboard">Дашборд</a>
         <a href="#/chats" data-tab="chats">Чаты</a>
         <a href="#/leads" data-tab="leads">Успешные чаты</a>
+        <a href="#/archive" data-tab="archive">Архив</a>
+        <a href="#/kb" data-tab="kb">База знаний</a>
+        <a href="#/review" data-tab="review">Проверка ответов</a>
         <a href="#/settings/agent" data-tab="settings">Настройки</a>
       </div>
       <section id="view" class="view"></section>

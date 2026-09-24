@@ -4,7 +4,11 @@
   "description": "AI-ассистент для чатов Авито",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --no-warnings src/server.js"
+    "start": "node --no-warnings src/server.js",
+    "test": "node --no-warnings test/smoke.js",
+    "mock": "node test/mock-server.js"
   },
-  "engines": { "node": ">=22.13" }
+  "engines": {
+    "node": ">=22.13"
+  }
 }
