@@ -1,6 +1,6 @@
 // Архив переписок: загрузка всей истории из Авито, статистика работы менеджеров,
 // выгрузка для анализа, прогон агента по реальным чатам и разбор чатов нейросетью.
-const { db, logEvent } = require('./db');
+const { db, logEvent, getSetting } = require('./db');
 const avito = require('./avito');
 const agent = require('./agent');
 const engine = require('./engine');
@@ -303,40 +303,53 @@ function replyPoints(messages) {
 }
 
 /** Сгенерировать ответы агента на каждую реплику клиента, не отправляя их. */
-async function replayChat(chatId, { maxTurns = 8, batch = null, models = null } = {}) {
-  // модели: переданные, иначе список для сравнения из настроек, иначе основная модель агента
-  const list = models?.length ? models : agent.compareModels().length ? agent.compareModels() : [null];
+/**
+ * Конфигурации для прогона: [{versionId, model}]. Переданные, иначе из настроек compare_configs,
+ * иначе список моделей compare_models с правилами из настроек, иначе основная модель.
+ */
+function resolveConfigs({ configs, models } = {}) {
+  if (configs?.length) return configs;
+  if (models?.length) return models.map((model) => ({ versionId: null, model }));
+  try {
+    const saved = JSON.parse(getSetting('compare_configs') || '[]');
+    if (Array.isArray(saved) && saved.length) return saved;
+  } catch { /* ignore */ }
+  const cm = agent.compareModels();
+  return cm.length ? cm.map((model) => ({ versionId: null, model })) : [{ versionId: null, model: null }];
+}
+
+/** Сгенерировать ответы агента на каждую реплику клиента, не отправляя их. Прежние ответы не удаляются. */
+async function replayChat(chatId, { maxTurns = 8, batch = null, models = null, configs = null } = {}) {
+  const list = resolveConfigs({ configs, models });
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat) throw new Error('Чат не найден');
   const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(chatId);
   const points = replyPoints(messages).slice(0, maxTurns);
-  // старые неоценённые прогоны заменяем свежими; оценённые оставляем для истории
-  db.prepare("DELETE FROM agent_runs WHERE chat_id = ? AND kind = 'replay' AND rating IS NULL AND correction IS NULL").run(chatId);
   let tokens = 0;
   let errors = 0;
   for (const p of points) {
     const idx = messages.indexOf(p);
     const history = messages.slice(0, idx + 1);
-    const clientText = history.filter((m) => m.source === 'client').map((m) => m.text).join('\n');
     const ctx = {
       item: chat.item_title || chat.item_id ? { id: chat.item_id, title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
-      phone: agent.extractPhone(clientText),
+      phone: chatstate.findPhone(history)?.phone || null,
       history,
     };
-    // все модели отвечают на одно и то же сообщение одновременно
-    const results = await Promise.allSettled(list.map((model) => agent.generateReply(ctx, { model })));
+    // все конфигурации отвечают на одно и то же сообщение одновременно
+    const results = await Promise.allSettled(list.map((c) => agent.generateReply(ctx, { model: c.model || undefined, versionId: c.versionId || null })));
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') {
         tokens += r.value.usage?.total_tokens || 0;
         engine.saveRun(chatId, 'replay', p, r.value, { batch });
       } else {
         errors++;
-        engine.saveRun(chatId, 'replay', p, { model: list[i] || undefined, reply: '' }, { batch, comment: 'Ошибка: ' + r.reason.message.slice(0, 300) });
+        engine.saveRun(chatId, 'replay', p, { model: list[i].model || getSetting('openai_model'), reply: '' },
+          { batch, versionId: list[i].versionId || null, comment: 'Ошибка: ' + r.reason.message.slice(0, 300) });
       }
     });
     if (errors && errors === results.length * (points.indexOf(p) + 1)) throw new Error(results[0].reason.message);
   }
-  return { turns: points.length, tokens, models: list.filter(Boolean), errors };
+  return { turns: points.length, tokens, configs: list.map((c) => agent.configLabel(agent.getVersion(c.versionId), c.model)), models: list.map((c) => c.model).filter(Boolean), errors };
 }
 
 function pickChats({ count = 10, onlyWithSeller = true, onlyLeads = false, order = 'recent', exclude = '' } = {}) {
@@ -359,7 +372,7 @@ function replayBatch(opts = {}) {
     for (const id of ids) {
       if (job.stop) break;
       try {
-        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch, models: opts.models });
+        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch, models: opts.models, configs: opts.configs });
         job.tokens += r.tokens;
       } catch (e) {
         job.errors++;

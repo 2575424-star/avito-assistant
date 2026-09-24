@@ -136,6 +136,14 @@ async function step(name, fn) {
     assert.match(chat.runs[0].reply, /Трейд-ин/, 'агент видит базу знаний');
     const runs = (await api('/api/runs')).data;
     assert.ok(runs.runs[0].actual.includes('в наличии'), 'рядом показан ответ менеджера');
+    // запись из разбора чатов — кандидат, агент её не видит до утверждения
+    const cand = await api('/api/kb', { entries: [{ category: 'faq', title: 'Скидка?', content: 'Скидка 300 000 ₽ всем', source: 'analysis' }] });
+    const sb1 = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Какая скидка?' }] });
+    assert.doesNotMatch(sb1.data.systemPrompt, /300 000/);
+    await api(`/api/kb/${cand.data.ids[0]}/status`, { status: 'approved' });
+    const sb2 = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Какая скидка?' }] });
+    assert.match(sb2.data.systemPrompt, /300 000/);
+    await api(`/api/kb/${cand.data.ids[0]}`, null, 'DELETE');
     r = await api('/api/runs/' + chat.runs[0].id, { rating: -1, correction: 'Да, в наличии! Как к вам обращаться и удобно ли, если менеджер перезвонит?', addToKb: true });
     assert.ok(r.data.kbId);
     const kb = (await api('/api/kb')).data.entries;
@@ -209,6 +217,33 @@ async function step(name, fn) {
     const sb = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Привет' }], models: 'gpt-4o-mini, openrouter:vendor/no-json' });
     assert.equal(sb.data.variants.length, 2);
     assert.equal(sb.data.reply.length > 0, true);
+  });
+
+  await step('стратегии A/B/C: версии, прогон «версия × модель», старые ответы не удаляются', async () => {
+    const v = (await api('/api/agent-versions')).data.versions;
+    assert.deepEqual(v.map((x) => x.key).sort(), ['A_direct', 'B_consultative', 'C_adaptive']);
+    const A = v.find((x) => x.key === 'A_direct'), C = v.find((x) => x.key === 'C_adaptive');
+    const before = (await api('/api/chats/u2i-chat-3')).data.runs.length;
+    const r = await api('/api/chats/u2i-chat-3/replay', { maxTurns: 1, configs: [{ versionId: A.id, model: 'gpt-4o-mini' }, { versionId: C.id, model: 'gpt-4o-mini' }] });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    assert.deepEqual(r.data.configs, ['A_direct v0.2.0 · gpt-4o-mini', 'C_adaptive v0.2.0 · gpt-4o-mini']);
+    await api('/api/chats/u2i-chat-3/replay', { maxTurns: 1, configs: [{ versionId: A.id, model: 'gpt-4o-mini' }] });
+    const runs = (await api('/api/chats/u2i-chat-3')).data.runs;
+    assert.equal(runs.length, before + 3, 'повторный прогон добавляет, а не заменяет');
+    const a = runs.filter((x) => x.agent_version_id === A.id);
+    assert.equal(a.length, 2);
+    assert.ok(a[0].prompt_hash && a[0].prompt_hash === a[1].prompt_hash, 'одинаковый промпт — одинаковый снимок');
+    const list = (await api('/api/runs?filter=replay')).data;
+    const grp = list.runs.filter((x) => x.chat_id === 'u2i-chat-3');
+    assert.equal(grp.length, 2, 'в сравнении — последний ответ каждой конфигурации');
+    assert.ok(list.models.some((m) => m.v_key === 'C_adaptive'));
+    // новая версия с тем же номером запрещена
+    const dup = await api('/api/agent-versions', { key: 'A_direct', version: 'v0.2.0', base_prompt: 'x' });
+    assert.equal(dup.status, 400);
+    const sb = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Есть в наличии?' }], item: { id: 9001 }, versionId: A.id });
+    assert.match(sb.data.systemPrompt, /Ярослав/);
+    assert.match(sb.data.systemPrompt, /СТРАТЕГИЯ: уже в первом ответе/);
+    assert.match(sb.data.systemPrompt, /СОСТОЯНИЕ ЧАТА: реплик 1, чат ещё не платный/);
   });
 
   await step('песочница с автомобилем из базы', async () => {

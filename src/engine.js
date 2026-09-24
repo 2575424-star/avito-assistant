@@ -342,7 +342,7 @@ async function processChat(chatId, opts = {}) {
       item: chat.item_title || chat.item_id ? { id: chat.item_id, title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
       phone: chat.phone,
       history,
-    });
+    }, { versionId: getSetting('live_agent_version_id') || null });
 
     if (result.phone && !chat.phone) markLead(chatId, result.phone, 'распознал агент');
 
@@ -395,11 +395,11 @@ function saveRun(chatId, kind, atMsg, result, extra = {}) {
     if (m.direction !== 'in') break;
     block.unshift(m.text);
   }
-  const r = db.prepare(`INSERT INTO agent_runs(chat_id, kind, at_message_id, at_created, client_text, reply, phone, handoff, skip, model, tokens, ms, batch, comment, created)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+  const r = db.prepare(`INSERT INTO agent_runs(chat_id, kind, at_message_id, at_created, client_text, reply, phone, handoff, skip, model, tokens, ms, batch, comment, created, agent_version_id, prompt_hash)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     chatId, kind, atMsg.id, atMsg.created, block.join('\n') || atMsg.text || '', result.reply || '', result.phone || null,
     result.handoff ? 1 : 0, result.skip ? 1 : 0, result.model || null, result.usage?.total_tokens || null, result.ms || null,
-    extra.batch || null, extra.comment || null, now(),
+    extra.batch || null, extra.comment || null, now(), result.versionId || extra.versionId || null, result.promptHash || null,
   );
   return Number(r.lastInsertRowid);
 }

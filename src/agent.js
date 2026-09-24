@@ -1,5 +1,6 @@
 // Агент: собирает промпт из правил + данных объявления + истории и получает ответ от OpenAI.
-const { getSetting } = require('./db');
+const crypto = require('node:crypto');
+const { db, getSetting } = require('./db');
 const knowledge = require('./knowledge');
 
 const OPENAI_BASE = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
@@ -17,13 +18,27 @@ const { normalizePhone } = chatstate;
 const extractPhone = chatstate.phoneInText;
 
 // ---------- Промпт ----------
+function getVersion(id) {
+  return id ? db.prepare('SELECT * FROM agent_versions WHERE id = ?').get(Number(id)) || null : null;
+}
+
+/** Подпись конфигурации: «A_direct v0.2.0 · gpt-4o-mini» или «Настройки · …». */
+function configLabel(version, model) {
+  return `${version ? version.key + ' ' + version.version : 'Настройки'} · ${model || getSetting('openai_model') || 'gpt-4o-mini'}`;
+}
+
 function buildSystemPrompt(ctx = {}) {
-  const name = getSetting('assistant_name') || 'Консультант';
-  const rules = getSetting('rules');
   const company = getSetting('company_info');
   const parts = [];
-  parts.push(`Тебя зовут ${name}. Ты отвечаешь покупателям в чатах Авито от лица продавца.`);
-  parts.push('ПРАВИЛА ОТВЕТА:\n' + rules);
+  if (ctx.version) {
+    // версия агента: своя общая инструкция и стратегия вместо правил из настроек
+    parts.push(ctx.version.base_prompt);
+    if (ctx.version.strategy) parts.push(ctx.version.strategy);
+  } else {
+    const name = getSetting('assistant_name') || 'Консультант';
+    parts.push(`Тебя зовут ${name}. Ты отвечаешь покупателям в чатах Авито от лица продавца.`);
+    parts.push('ПРАВИЛА ОТВЕТА:\n' + getSetting('rules'));
+  }
   if (company) parts.push('ИНФОРМАЦИЯ О КОМПАНИИ:\n' + company);
 
   // карточка автомобиля: полная из базы (фид / API), иначе то, что пришло в контексте чата
@@ -142,10 +157,17 @@ async function generateReply(ctx, opts = {}) {
   const queryText = (ctx.history || []).filter((m) => m.direction === 'in' && m.source !== 'system').slice(-3).map((m) => m.text).join('\n');
   const history = ctx.history || [];
   const found = chatstate.findPhone(history);
-  const system = buildSystemPrompt({ ...ctx, phone: ctx.phone || found?.phone || null, alreadyGreeted, queryText, chatState: chatstate.cpaState(history) });
+  const version = getVersion(opts.versionId);
+  const system = buildSystemPrompt({ ...ctx, version, phone: ctx.phone || found?.phone || null, alreadyGreeted, queryText, chatState: chatstate.cpaState(history) });
+  // снимок промпта: по хэшу всегда можно восстановить, что именно видела модель
+  const promptHash = crypto.createHash('sha256').update(system).digest('hex').slice(0, 16);
+  db.prepare('INSERT OR IGNORE INTO prompt_snapshots(hash, text, created) VALUES(?,?,?)').run(promptHash, system, Math.floor(Date.now() / 1000));
   const messages = [{ role: 'system', content: system }, ...historyToMessages(ctx.history || [])];
   const started = Date.now();
-  const { content, usage, model } = await callOpenAI(messages, { model: opts.model });
+  const { content, usage, model } = await callOpenAI(messages, {
+    model: opts.model || version?.model || undefined,
+    temperature: version?.temperature ?? undefined,
+  });
   const ms = Date.now() - started;
   const parsed = parseAgentJson(content);
   // телефон из сообщений клиента надёжнее, чем из ответа модели
@@ -153,7 +175,7 @@ async function generateReply(ctx, opts = {}) {
   const digits = clientText.replace(/\D/g, '');
   const modelPhoneOk = parsed.phone && digits.includes(parsed.phone.slice(2)); // модель не должна выдумать номер
   const phone = found?.phone || (modelPhoneOk ? parsed.phone : null);
-  return { ...parsed, phone, usage, model, ms, systemPrompt: system };
+  return { ...parsed, phone, usage, model, ms, systemPrompt: system, versionId: version?.id || null, promptHash, config: configLabel(version, model) };
 }
 
 // ---------- Разбор переписок менеджеров ----------
@@ -228,4 +250,4 @@ FAQ: ${(x.faq || []).map((f) => f.q + ' → ' + f.a).join(' | ')}`;
   return { result: obj, usage, model };
 }
 
-module.exports = { compareModels, generateReply, extractPhone, normalizePhone, buildSystemPrompt, analyzeChat, summarizeReviews, transcript };
+module.exports = { getVersion, configLabel, compareModels, generateReply, extractPhone, normalizePhone, buildSystemPrompt, analyzeChat, summarizeReviews, transcript };

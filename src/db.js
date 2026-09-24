@@ -148,6 +148,28 @@ CREATE TABLE IF NOT EXISTS reports (
   created INTEGER
 );
 
+-- версии агента: общая инструкция + стратегия; использованная версия не меняется, правка = новая версия
+CREATE TABLE IF NOT EXISTS agent_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,            -- A_direct / B_consultative / C_adaptive / …
+  version TEXT NOT NULL,        -- v0.2.0
+  title TEXT,
+  base_prompt TEXT NOT NULL,
+  strategy TEXT,
+  model TEXT,                   -- пусто — модель выбирается при прогоне
+  temperature REAL,
+  status TEXT DEFAULT 'active', -- active / archived
+  created INTEGER,
+  UNIQUE(key, version)
+);
+
+-- полный текст промпта каждого ответа, по хэшу (для воспроизводимости)
+CREATE TABLE IF NOT EXISTS prompt_snapshots (
+  hash TEXT PRIMARY KEY,
+  text TEXT,
+  created INTEGER
+);
+
 -- фактические целевые действия Авито (списания): чаты и звонки
 CREATE TABLE IF NOT EXISTS cpa_actions (
   id TEXT PRIMARY KEY,          -- 'chat:<actionId>' / 'call:<id>'
@@ -215,7 +237,9 @@ const DEFAULTS = {
   feed_url: '',               // XML-фид автозагрузки с автомобилями
   kb_budget_chars: '16000',   // сколько символов базы знаний класть в промпт
   analysis_model: '',         // модель для разбора чатов (пусто — как у агента)
-  compare_models: '',         // модели для сравнения при прогоне: через запятую; openrouter:… — через OpenRouter
+  compare_models: '',
+  compare_configs: '',        // JSON [{versionId, model}] — конфигурации для прогона
+  live_agent_version_id: '',  // версия для черновиков на живые сообщения (пусто — правила из настроек)         // модели для сравнения при прогоне: через запятую; openrouter:… — через OpenRouter
   openrouter_api_key: '',
 };
 
@@ -251,10 +275,17 @@ function logEvent(type, text, chatId = null, level = 'info') {
 }
 
 // миграции для баз, созданных до появления колонок
-for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0'], ['agent_runs', 'ms', 'INTEGER'],
-  ['items', 'availability', 'TEXT'], ['items', 'availability_src', 'TEXT'], ['items', 'availability_manual', 'TEXT']]) {
+for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0'], ['agent_runs', 'ms', 'INTEGER'], ['agent_runs', 'agent_version_id', 'INTEGER'], ['agent_runs', 'prompt_hash', 'TEXT'],
+  ['items', 'availability', 'TEXT'], ['kb', 'status', "TEXT DEFAULT 'approved'"], ['items', 'availability_src', 'TEXT'], ['items', 'availability_manual', 'TEXT']]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+
+// стратегии v0.2.0 из docs/agent-prompt-v0.2.0.md
+{
+  const { BASE_V020, STRATEGIES_V020 } = require('./strategies');
+  const ins = db.prepare('INSERT OR IGNORE INTO agent_versions(key, version, title, base_prompt, strategy, status, created) VALUES(?,?,?,?,?,?,?)');
+  for (const x of STRATEGIES_V020) ins.run(x.key, 'v0.2.0', x.title, BASE_V020, x.strategy, 'active', Math.floor(Date.now() / 1000));
 }
 
 if (!getSetting('webhook_secret')) {
