@@ -83,7 +83,7 @@ $('#aiGlobal').addEventListener('change', async (e) => {
 });
 
 // ---------- router ----------
-const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings, archive: renderArchive, kb: renderKb, review: renderReview };
+const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings, archive: renderArchive, kb: renderKb, review: renderReview, lab: renderLab };
 function route() {
   clearInterval(state.chatTimer);
   state.timers.forEach(clearInterval);
@@ -335,7 +335,7 @@ async function renderLeads() {
 }
 
 // ---------- settings ----------
-const SUBTABS = [['agent', 'Агент'], ['strategies', 'Стратегии'], ['templates', 'Шаблоны'], ['sandbox', 'Тест агента'], ['avito', 'Авито'], ['notify', 'Уведомления'], ['log', 'Журнал']];
+const SUBTABS = [['agent', 'Агент'], ['strategies', 'Стратегии'], ['keys', 'Ключи и модели'], ['templates', 'Шаблоны'], ['sandbox', 'Тест агента'], ['avito', 'Авито'], ['notify', 'Уведомления'], ['log', 'Журнал']];
 
 async function renderSettings(parts) {
   const sub = SUBTABS.some(([k]) => k === parts[0]) ? parts[0] : 'agent';
@@ -343,7 +343,7 @@ async function renderSettings(parts) {
   view().innerHTML = head + '<div id="sub"></div>';
   const box = $('#sub');
   const s = await api('/api/settings');
-  ({ agent: settingsAgent, strategies: settingsStrategies, templates: settingsTemplates, sandbox: settingsSandbox, avito: settingsAvito, notify: settingsNotify, log: settingsLog })[sub](box, s);
+  ({ agent: settingsAgent, strategies: settingsStrategies, keys: settingsKeys, templates: settingsTemplates, sandbox: settingsSandbox, avito: settingsAvito, notify: settingsNotify, log: settingsLog })[sub](box, s);
 }
 
 function bindSave(box, keys, btnSel = '.save') {
@@ -701,7 +701,7 @@ function jobHtml(j, label) {
   const pct = j.total ? Math.round((j.done / j.total) * 100) : null;
   return `<div class="progress"><div style="width:${pct ?? (j.running ? 30 : 100)}%"></div></div>
     <div class="small muted">${j.running ? '⏳ ' + label : j.error ? '⚠ Ошибка: ' + esc(j.error) : '✓ Завершено'} · ${j.done}${j.total ? ' из ' + j.total : ''}
-    ${j.messages !== undefined ? ` · новых сообщений ${j.messages}` : ''}${j.tokens ? ` · ${j.tokens} ток.` : ''}${j.errors ? ` · ошибок ${j.errors}` : ''} ${j.note ? '· ' + esc(j.note) : ''}
+    ${j.messages !== undefined ? ` · новых сообщений ${j.messages}` : ''}${j.tokens ? ` · ${j.tokens} ток.` : ''}${j.cost !== undefined ? ` · расход ~$${j.cost.toFixed(4)} из лимита $${j.limit}` : ''}${j.errors ? ` · ошибок ${j.errors}` : ''} ${j.note ? '· ' + esc(j.note) : ''}
     ${j.running ? `<button class="link" data-stop="${j.type}">остановить</button>` : ''}</div>`;
 }
 
@@ -1091,6 +1091,208 @@ async function renderReview() {
   });
   watchJob('replay', $('#rbJob'), 'Агент отвечает на сообщения клиентов…', load);
   await load();
+}
+
+
+// ---------- Ключи и модели (для Лаборатории) ----------
+async function settingsKeys(box) {
+  const [kp, cfg] = await Promise.all([api('/api/key-profiles'), api('/api/lab/config')]);
+  const profOpts = (sel) => `<option value="">— нет ключа —</option>` + kp.profiles.map((p) => `<option value="${p.id}" ${sel === p.id ? 'selected' : ''}>${esc(p.name)} ${esc(p.key_mask)}</option>`).join('');
+  box.innerHTML = `
+    <div class="card"><h3>Как получить ключи OpenAI для GPT-6 Sol и GPT-6 Luna</h3>
+      <ol class="small" style="line-height:1.7;margin:0;padding-left:18px">
+        <li>Откройте <b>platform.openai.com</b> → слева вверху выбор проекта → <b>Create project</b>. Создайте два проекта: «Avito Sol» и «Avito Luna» — так расход каждой модели будет виден отдельно в <b>Usage</b> и <b>Billing</b>.</li>
+        <li>В каждом проекте: <b>Settings → Project → Limits</b> — разрешите модель (gpt-6-sol в первом, gpt-6-luna во втором) и поставьте месячный лимит расходов, например $10.</li>
+        <li>В каждом проекте: <b>API keys → Create new secret key</b>, права — «All» или хотя бы доступ к Responses. Ключ показывается один раз: скопируйте его.</li>
+        <li>Ниже добавьте два профиля: «Sol» с первым ключом и «Luna» со вторым. Ключ хранится только на сервере; здесь и в результатах видна маска ••••1234.</li>
+        <li>В таблице моделей привяжите GPT-6 Sol к профилю «Sol», GPT-6 Luna — к «Luna». Проверьте цены за 1 млн токенов на openai.com/api/pricing.</li>
+      </ol>
+    </div>
+    <div class="card"><h3>Профили ключей</h3>
+      ${kp.profiles.map((p) => `<div class="kb-item"><div><b>${esc(p.name)}</b> <span class="badge">${esc(p.provider)}</span> ${p.has_key ? `<span class="badge green">ключ ${esc(p.key_mask)}</span>` : '<span class="badge orange">ключа нет</span>'}${p.base_url ? ` <span class="small muted">${esc(p.base_url)}</span>` : ''}</div>
+        <div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-editp="${p.id}">Изменить</button><button class="btn sm danger" data-delp="${p.id}">✕</button></div></div>`).join('') || '<div class="muted">Профилей пока нет.</div>'}
+      <div class="form" style="margin-top:14px"><input type="hidden" id="kpId">
+        <div class="grid c2">
+          <label>Название<input type="text" id="kpName" placeholder="Sol"></label>
+          <label>Провайдер<select id="kpProv"><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option></select></label>
+          <label>API-ключ<input type="password" id="kpKey" autocomplete="new-password" placeholder="sk-proj-…"></label>
+          <label>Адрес API (необязательно)<input type="text" id="kpBase" placeholder="по умолчанию https://api.openai.com/v1"></label>
+        </div>
+        <div class="row"><button class="btn primary" id="kpSave">Сохранить профиль</button><button class="btn" id="kpReset">Очистить</button></div>
+      </div>
+    </div>
+    <div class="card"><h3>Модели для сравнения</h3>
+      <div class="muted small" style="margin-bottom:10px">API «Responses» — основной у OpenAI для новых моделей; если модель его не поддерживает, сервис сам перейдёт на Chat Completions. Температура не передаётся (одинаковые условия). Цена кэша пусто — кэш считается по цене входа, с запасом.</div>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Название</th><th>Модель (API id)</th><th>API</th><th>Ключ</th><th>Reasoning</th><th>$ вход / кэш / выход за 1М</th><th></th></tr></thead><tbody>
+      ${cfg.models.map((m) => `<tr data-mid="${m.id}">
+        <td><input type="text" data-f="label" value="${esc(m.label)}" style="width:120px"></td>
+        <td><input type="text" data-f="model" value="${esc(m.model)}" style="width:130px"></td>
+        <td><select data-f="api" style="width:auto"><option value="responses" ${m.api === 'responses' ? 'selected' : ''}>Responses</option><option value="chat" ${m.api === 'chat' ? 'selected' : ''}>Chat</option></select></td>
+        <td><select data-f="key_profile_id" style="width:auto">${profOpts(m.key_profile_id)}</select></td>
+        <td><select data-f="reasoning_effort" style="width:auto">${['', 'minimal', 'low', 'medium', 'high'].map((x) => `<option value="${x}" ${(m.reasoning_effort || '') === x ? 'selected' : ''}>${x || 'по умолчанию'}</option>`).join('')}</select></td>
+        <td style="white-space:nowrap"><input type="number" step="0.01" data-f="price_in" value="${m.price_in ?? ''}" style="width:70px"> <input type="number" step="0.01" data-f="price_cached_in" value="${m.price_cached_in ?? ''}" style="width:70px"> <input type="number" step="0.01" data-f="price_out" value="${m.price_out ?? ''}" style="width:70px"></td>
+        <td><button class="btn sm primary" data-savem="${m.id}">Сохранить</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="muted small" style="margin-top:6px">Версия цен: ${esc(cfg.models[0]?.price_version || '—')}</div>
+    </div>`;
+  const reset = () => { $('#kpId').value = ''; $('#kpName').value = ''; $('#kpKey').value = ''; $('#kpBase').value = ''; $('#kpProv').value = 'openai'; };
+  $('#kpReset').addEventListener('click', reset);
+  $('#kpSave').addEventListener('click', async () => {
+    try {
+      await api('/api/key-profiles', { body: { id: $('#kpId').value || undefined, name: $('#kpName').value, provider: $('#kpProv').value, api_key: $('#kpKey').value, base_url: $('#kpBase').value } });
+      toast('Профиль сохранён'); settingsKeys(box);
+    } catch (e) { toast(e.message, true); }
+  });
+  $$('[data-editp]', box).forEach((b) => b.addEventListener('click', () => {
+    const p = kp.profiles.find((x) => x.id === Number(b.dataset.editp));
+    $('#kpId').value = p.id; $('#kpName').value = p.name; $('#kpProv').value = p.provider; $('#kpBase').value = p.base_url || ''; $('#kpKey').value = ''; $('#kpKey').placeholder = p.has_key ? 'оставьте пустым, чтобы не менять' : 'sk-…';
+  }));
+  $$('[data-delp]', box).forEach((b) => b.addEventListener('click', async () => { if (!confirm('Удалить профиль ключа?')) return; await api('/api/key-profiles/' + b.dataset.delp, { method: 'DELETE' }); settingsKeys(box); }));
+  $$('[data-savem]', box).forEach((b) => b.addEventListener('click', async () => {
+    const tr = b.closest('tr'); const body = { id: Number(tr.dataset.mid), price_version: cfg.models.find((m) => m.id === Number(tr.dataset.mid)).price_version };
+    $$('[data-f]', tr).forEach((el) => { body[el.dataset.f] = el.value; });
+    try { await api('/api/lab/models', { body }); toast('Модель сохранена'); } catch (e) { toast(e.message, true); }
+  }));
+}
+
+// ---------- Лаборатория ----------
+const LAB_CRIT = { completeness: 'Полнота', accuracy: 'Точность фактов', constraints: 'Соблюдение правил', naturalness: 'Естественность', next_step: 'Следующий шаг' };
+const usd = (x) => (x == null ? '—' : '$' + (x < 0.01 ? x.toFixed(5) : x.toFixed(3)));
+
+async function renderLab() {
+  const cfg = await api('/api/lab/config');
+  state.lab ||= { set: 'faq', cases: new Set(), models: new Set(cfg.models.filter((m) => /gpt-6/.test(m.model)).map((m) => m.id)), versions: new Set(cfg.strategies.map((s) => s.id)), view: null, blind: false };
+  const L = state.lab;
+  const sets = { standard: 'Стандартные (GPT)', faq: 'Частые вопросы клиентов', custom: 'Свои вопросы' };
+  view().innerHTML = `
+    <div class="notice info" style="margin-bottom:16px">Лаборатория сравнивает стратегии общения на разных моделях на одних и тех же учебных вопросах. Изолирована от работы: не пишет в Авито, не трогает чаты, лиды и уведомления. Факты в сценариях учебные, не действующие цены.</div>
+    <div class="card"><h3>1. Что сравниваем</h3>
+      <div class="grid c2">
+        <div><b class="small">Стратегии</b> <a class="small" href="#/settings/strategies">редактор и версии →</a><div class="chips" style="margin-top:6px">${cfg.strategies.map((v) => `<label class="chip ${L.versions.has(v.id) ? 'active' : ''}"><input type="checkbox" data-lv="${v.id}" ${L.versions.has(v.id) ? 'checked' : ''} style="display:none">${esc(v.title || v.key)} ${esc(v.version)}</label>`).join('')}</div></div>
+        <div><b class="small">Модели</b> <a class="small" href="#/settings/keys">ключи и цены →</a><div class="chips" style="margin-top:6px">${cfg.models.map((m) => `<label class="chip ${L.models.has(m.id) ? 'active' : ''}"><input type="checkbox" data-lm="${m.id}" ${L.models.has(m.id) ? 'checked' : ''} style="display:none">${esc(m.label)} ${m.profile_name ? '' : '⚠ нет ключа'}</label>`).join('')}</div></div>
+      </div>
+      <div style="margin-top:14px"><div class="row"><b class="small">Вопросы</b><span class="spacer"></span>
+        <div class="chips">${Object.entries(sets).map(([k, l]) => `<button class="chip ${L.set === k ? 'active' : ''}" data-set="${k}">${l} ${cfg.cases.filter((c) => c.set_name === k).length}</button>`).join('')}</div></div>
+        <div class="row small" style="margin:8px 0"><button class="link" id="labAll">выбрать все в наборе</button><button class="link" id="labNone">снять выбор</button><span class="muted">выбрано: <b id="labSelN">0</b></span></div>
+        <div style="max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:10px;padding:6px 10px">
+          ${cfg.cases.filter((c) => c.set_name === L.set).map((c) => `<label class="small" style="flex-direction:row;align-items:flex-start;gap:8px;padding:5px 0;color:var(--text)"><input type="checkbox" data-lc="${esc(c.id)}" ${L.cases.has(c.id) ? 'checked' : ''}>
+            <span><b>${esc(c.id)}</b> ${esc(c.title)} — <span class="muted">${esc(c.client_turns.join(' / '))}</span></span></label>`).join('') || '<div class="muted small">Пусто</div>'}
+        </div>
+        <details style="margin-top:8px"><summary class="small" style="cursor:pointer">+ Свой вопрос</summary><div class="form" style="margin-top:8px">
+          <label>Сообщения клиента (каждый ход — через пустую строку)<textarea id="custText" rows="3" placeholder="Здравствуйте, машина в наличии?"></textarea></label>
+          <label>Учебные факты (JSON, необязательно)<textarea id="custFacts" rows="3" placeholder='{"availability": "в наличии", "cash_total_rub": 3150000}'></textarea></label>
+          <div class="row"><button class="btn sm" id="custAdd">Добавить вопрос</button></div></div></details>
+      </div>
+    </div>
+    <div class="card"><h3>2. Запуск</h3>
+      <div class="row">
+        <label style="flex-direction:row;align-items:center">Лимит, $ <input type="number" id="labLimit" value="${L.limit || 3}" min="0.01" step="0.5" style="width:90px"></label>
+        <label style="flex-direction:row;align-items:center">Повторов <input type="number" id="labRep" value="1" min="1" max="5" style="width:70px"></label>
+        <label style="flex-direction:row;align-items:center">Параллельно <input type="number" id="labConc" value="3" min="1" max="6" style="width:70px"></label>
+        <button class="btn primary" id="labRun">▶ Запустить</button>
+      </div>
+      <div class="small" id="labEst" style="margin-top:10px"></div>
+      <div id="labJob"></div>
+    </div>
+    <div class="card"><div class="row"><h3 style="margin:0">3. Сводка по комбинациям</h3><span class="spacer"></span>
+      <select id="sumSet" style="width:auto"><option value="">все вопросы</option>${Object.entries(sets).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+      <a class="btn sm" href="/api/lab/export.json">⬇ Экспорт JSON</a></div>
+      <div id="labSum" style="margin-top:12px"></div></div>
+    <div class="card"><div class="row"><h3 style="margin:0">4. Ответы по вопросу</h3><span class="spacer"></span>
+      <select id="labCase" style="width:auto;max-width:360px">${cfg.cases.map((c) => `<option value="${esc(c.id)}" ${L.view === c.id ? 'selected' : ''}>${esc(c.id)} — ${esc(c.title)}</option>`).join('')}</select>
+      <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="labBlind" ${L.blind ? 'checked' : ''}> слепая оценка</label></div>
+      <div id="labGrid" style="margin-top:12px"></div></div>`;
+
+  const selIds = () => [...L.cases];
+  const updEst = async () => {
+    $('#labSelN').textContent = L.cases.size;
+    if (!L.cases.size || !L.versions.size || !L.models.size) { $('#labEst').innerHTML = '<span class="muted">Выберите стратегии, модели и вопросы.</span>'; return; }
+    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value } });
+    $('#labEst').innerHTML = `<b>${e.runs}</b> прогонов, <b>${e.requests}</b> запросов к моделям. Ожидаемый расход: <b>${usd(e.low)} – ${usd(e.high)}</b> (${e.perModel.map((m) => `${esc(m.label)}: ${m.priced ? usd(m.low) + '–' + usd(m.high) : 'цена не задана'}`).join('; ')}). Оценка по длине промптов, точный расход — по usage после прогона.
+      ${e.missingKeys.length ? `<div style="color:var(--orange)">Нет ключа: ${e.missingKeys.map(esc).join(', ')} — <a href="#/settings/keys">добавить</a></div>` : ''}`;
+  };
+  const chip = (sel, set, attr) => $$(sel).forEach((i) => i.addEventListener('change', () => { const id = Number(i.dataset[attr]); i.checked ? set.add(id) : set.delete(id); i.parentElement.classList.toggle('active', i.checked); updEst(); }));
+  chip('[data-lv]', L.versions, 'lv');
+  chip('[data-lm]', L.models, 'lm');
+  $$('[data-lc]').forEach((i) => i.addEventListener('change', () => { i.checked ? L.cases.add(i.dataset.lc) : L.cases.delete(i.dataset.lc); updEst(); }));
+  $$('[data-set]').forEach((b) => b.addEventListener('click', () => { L.set = b.dataset.set; renderLab(); }));
+  $('#labAll').addEventListener('click', () => { cfg.cases.filter((c) => c.set_name === L.set).forEach((c) => L.cases.add(c.id)); $$('[data-lc]').forEach((i) => { i.checked = true; }); updEst(); });
+  $('#labNone').addEventListener('click', () => { L.cases.clear(); $$('[data-lc]').forEach((i) => { i.checked = false; }); updEst(); });
+  $('#labRep').addEventListener('change', updEst);
+  $('#custAdd').addEventListener('click', async () => {
+    try {
+      const r = await api('/api/lab/case', { body: { text: $('#custText').value, facts: $('#custFacts').value.trim() || undefined } });
+      L.set = 'custom'; L.cases.add(r.id); toast('Вопрос добавлен'); renderLab();
+    } catch (e) { toast(e.message, true); }
+  });
+  $('#labRun').addEventListener('click', async () => {
+    L.limit = Number($('#labLimit').value);
+    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value } });
+    if (!confirm(`Запустить ${e.runs} прогонов (${e.requests} запросов)? Ожидаемый расход ${usd(e.low)}–${usd(e.high)}, лимит $${L.limit}. Прогон остановится при достижении лимита.`)) return;
+    try {
+      await api('/api/lab/run', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value, concurrency: $('#labConc').value, limitUsd: L.limit } });
+      toast('Прогон запущен');
+    } catch (err) { toast(err.message, true); }
+  });
+
+  const loadSum = async () => {
+    const d = await api('/api/lab/summary?set=' + $('#sumSet').value);
+    const box = $('#labSum');
+    if (!box) return;
+    box.innerHTML = d.summary.length ? `<div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Стратегия</th><th>Модель</th><th>Прогонов</th><th>Ошибок</th><th>Оценено</th>${Object.values(LAB_CRIT).map((l) => `<th>${l}</th>`).join('')}<th>Итог</th><th>Критич. (авто / человек)</th><th>Время (медиана)</th><th>Токены вход / кэш / выход / reasoning</th><th>Стоимость всего / за прогон</th></tr></thead><tbody>
+      ${d.summary.map((r) => `<tr><td><b>${esc(r.strategy)}</b></td><td>${esc(r.model)}</td><td>${r.runs}</td><td>${r.errors}</td><td>${r.rated} (${Math.round((r.rated / r.runs) * 100)}%)</td>
+        ${Object.keys(LAB_CRIT).map((k) => `<td>${r.avg[k] ?? '—'}</td>`).join('')}<td><b>${r.overall ?? '—'}</b></td><td>${r.criticalAuto} / ${r.criticalHuman}</td>
+        <td>${r.medianMs ? (r.medianMs / 1000).toFixed(1) + ' с' : '—'}</td><td class="small">${r.inputTokens} / ${r.cachedTokens} / ${r.outputTokens} / ${r.reasoningTokens}</td>
+        <td>${usd(r.cost)} / ${usd(r.costPerRun)}${r.costUnknown ? `<div class="small muted">неизвестно: ${r.costUnknown}</div>` : ''}</td></tr>`).join('')}
+      </tbody></table></div><div class="muted small" style="margin-top:6px">Стоимость — расчёт по usage и ценам из настроек, не фактическое списание; сверяйте с Usage в кабинете OpenAI (отдельный проект на модель). «Критич. авто» — чаты с автоматически найденной грубой ошибкой; проверьте глазами. Оценки и 👍 — качество ответа, не конверсия.</div>` : '<div class="muted">Прогонов пока нет.</div>';
+  };
+  $('#sumSet').addEventListener('change', loadSum);
+
+  const loadGrid = async () => {
+    const id = $('#labCase').value; L.view = id;
+    const kase = cfg.cases.find((c) => c.id === id);
+    const d = await api('/api/lab/runs?case=' + encodeURIComponent(id));
+    const box = $('#labGrid');
+    if (!box) return;
+    // последний прогон каждой комбинации «версия × модель»
+    const latest = {}; const older = {};
+    for (const r of d.runs) { const k = r.version_id + '|' + r.lab_model_id; if (!latest[k]) latest[k] = r; else older[k] = (older[k] || 0) + 1; }
+    let cards = Object.values(latest);
+    const blind = L.blind;
+    if (blind) { const seed = [...id].reduce((a, c) => a + c.charCodeAt(0), 0); cards = cards.map((r, i) => ({ r, o: Math.sin(seed + r.id) })).sort((a, b) => a.o - b.o).map((x) => x.r); }
+    else {
+      // строки — стратегии в порядке списка, столбцы — модели (Sol, Luna)
+      const so = (r) => { const i = cfg.strategies.findIndex((v) => v.id === r.version_id); return i < 0 ? 99 : i; };
+      cards.sort((a, b) => so(a) - so(b) || a.version_id - b.version_id || a.lab_model_id - b.lab_model_id);
+    }
+    const head = `<div class="small muted" style="margin-bottom:8px"><b>Учебные факты:</b> ${esc(JSON.stringify(kase?.facts || {}))}<br><b>Ожидается:</b> ${esc((kase?.expected || []).join('; ') || '—')}</div>`;
+    box.innerHTML = head + (cards.length ? `<div class="compare" style="grid-template-columns:repeat(${blind ? 3 : Math.min(2, cards.length)}, minmax(0,1fr))">${cards.map((r, i) => {
+      const hide = blind && !r.rated_at;
+      const label = hide ? `Вариант ${i + 1}` : `${esc(r.v_key)} ${esc(r.v_version)} · ${esc(r.model_label || r.model)}`;
+      const k = r.version_id + '|' + r.lab_model_id;
+      return `<div class="draft ${r.status === 'error' ? 'bad' : r.rated_at ? 'good' : ''}" data-lr="${r.id}" style="max-width:none">
+        <div class="draft-head"><b>${label}</b>${hide ? '' : ` · ${r.api} · ${r.ms ? (r.ms / 1000).toFixed(1) + ' с' : ''} · ${usd(r.cost_usd)}${r.usage_known ? ` · ${r.input_tokens}/${r.cached_tokens}/${r.output_tokens}/${r.reasoning_tokens} ток.` : ' · usage неизвестен'}`}${older[k] && !hide ? ` · ещё прогонов: ${older[k]}` : ''}</div>
+        ${r.status === 'error' ? `<div style="color:var(--red)">Ошибка: ${esc(r.error)}</div>` : ''}
+        ${r.turns.map((t) => `<div class="client-says small" style="margin:6px 0">${esc(t.client)}</div><div class="draft-text">${esc(t.reply ?? '')}${t.parsed?.skip ? ' <span class="badge">промолчал</span>' : ''}${t.parsed?.handoff ? ' <span class="badge orange">менеджеру</span>' : ''}</div>`).join('')}
+        ${r.flags.length ? `<div style="margin-top:6px">${r.flags.map((f) => `<span class="badge ${f.critical ? 'red' : 'orange'}" title="ход ${f.turn}">${esc(f.text)}</span>`).join(' ')}</div>` : ''}
+        ${r.status === 'error' ? '' : `<div class="form" style="margin-top:8px;gap:6px">
+          <div class="row small" style="gap:6px">${Object.entries(LAB_CRIT).map(([c, l]) => `<label style="flex-direction:row;align-items:center;gap:4px">${l}<select data-sc="${c}" style="width:auto;padding:4px">${['', 1, 2, 3, 4, 5].map((v) => `<option ${String(r.scores?.[c] ?? '') === String(v) ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`).join('')}</div>
+          <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" data-crit ${r.critical ? 'checked' : ''}> критическая ошибка</label>
+          <input type="text" data-comment placeholder="Комментарий" value="${esc(r.comment || '')}">
+          <textarea data-corr rows="2" placeholder="Как надо было ответить (необязательно)">${esc(r.correction || '')}</textarea>
+          <div><button class="btn sm primary" data-rate>Сохранить оценку</button></div></div>`}
+      </div>`;
+    }).join('')}</div>` : '<div class="muted">По этому вопросу прогонов ещё нет.</div>');
+    $$('[data-lr]', box).forEach((el) => $('[data-rate]', el)?.addEventListener('click', async () => {
+      const scores = {}; $$('[data-sc]', el).forEach((s) => { if (s.value) scores[s.dataset.sc] = Number(s.value); });
+      await api(`/api/lab/runs/${el.dataset.lr}/rate`, { body: { scores, critical: $('[data-crit]', el).checked, comment: $('[data-comment]', el).value, correction: $('[data-corr]', el).value } });
+      toast('Оценка сохранена'); loadGrid(); loadSum();
+    }));
+  };
+  $('#labCase').addEventListener('change', loadGrid);
+  $('#labBlind').addEventListener('change', (e) => { L.blind = e.target.checked; loadGrid(); });
+  watchJob('lab', $('#labJob'), 'Модели отвечают…', () => { loadSum(); loadGrid(); });
+  updEst(); loadSum(); loadGrid();
 }
 
 // ---------- boot ----------

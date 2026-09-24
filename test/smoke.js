@@ -221,7 +221,9 @@ async function step(name, fn) {
 
   await step('стратегии A/B/C: версии, прогон «версия × модель», старые ответы не удаляются', async () => {
     const v = (await api('/api/agent-versions')).data.versions;
-    assert.deepEqual(v.map((x) => x.key).sort(), ['A_direct', 'B_consultative', 'C_adaptive']);
+    // решение владельца v0.3.0: A/B/C в архиве (история и прогон по id сохраняются), активны три стратегии лаборатории
+    assert.deepEqual(v.filter((x) => x.status === 'archived').map((x) => x.key).sort(), ['A_direct', 'B_consultative', 'C_adaptive']);
+    assert.deepEqual(v.filter((x) => x.status === 'active').map((x) => x.key).sort(), ['claude_independent', 'codex_business', 'codex_friendly']);
     const A = v.find((x) => x.key === 'A_direct'), C = v.find((x) => x.key === 'C_adaptive');
     const before = (await api('/api/chats/u2i-chat-3')).data.runs.length;
     const r = await api('/api/chats/u2i-chat-3/replay', { maxTurns: 1, configs: [{ versionId: A.id, model: 'gpt-4o-mini' }, { versionId: C.id, model: 'gpt-4o-mini' }] });
@@ -244,6 +246,96 @@ async function step(name, fn) {
     assert.match(sb.data.systemPrompt, /Ярослав/);
     assert.match(sb.data.systemPrompt, /СТРАТЕГИЯ: уже в первом ответе/);
     assert.match(sb.data.systemPrompt, /СОСТОЯНИЕ ЧАТА: реплик 1, чат ещё не платный/);
+  });
+
+  await step('Лаборатория: 3 стратегии × 2 модели, отдельные ключи, расходы, изоляция', async () => {
+    const cfg = (await api('/api/lab/config')).data;
+    assert.deepEqual(cfg.strategies.map((x) => x.key), ['codex_business', 'codex_friendly', 'claude_independent'], 'ровно три активные стратегии');
+    assert.deepEqual(cfg.models.map((x) => x.model), ['gpt-6-sol', 'gpt-6-luna']);
+    assert.equal(cfg.cases.filter((c) => c.set_name === 'standard').length, 12);
+    assert.equal(cfg.cases.filter((c) => c.set_name === 'faq').length, 20);
+    const [sol, luna] = cfg.models;
+    // без ключей прогон не запускается
+    const noKey = await api('/api/lab/run', { caseIds: ['FAQ01'], versionIds: cfg.strategies.map((x) => x.id), modelIds: [sol.id], limitUsd: 1 });
+    assert.equal(noKey.status, 400);
+    // два профиля ключей: секрет не возвращается
+    const p1 = (await api('/api/key-profiles', { name: 'Sol', provider: 'openai', api_key: 'sk-sol-test-1234' })).data.id;
+    const p2 = (await api('/api/key-profiles', { name: 'Luna', provider: 'openai', api_key: 'sk-luna-test-5678' })).data.id;
+    const prof = (await api('/api/key-profiles')).data.profiles;
+    assert.ok(!JSON.stringify(prof).includes('sk-sol-test'), 'ключ не уходит в браузер');
+    assert.equal(prof[0].key_mask, '••••1234');
+    await api('/api/lab/models', { ...sol, key_profile_id: p1 });
+    await api('/api/lab/models', { ...luna, key_profile_id: p2 });
+    const before = { chats: (await api('/api/archive/stats')).data.totalChats, msgs: (await api('/api/archive/stats')).data.totalMessages, leads: (await api('/api/leads?from=2000-01-01')).data.leads.length, runs: (await api('/api/runs?filter=')).data.stats.total, c: await counters() };
+    const sel = { caseIds: ['STD02', 'STD10', 'FAQ01'], versionIds: cfg.strategies.map((x) => x.id), modelIds: [sol.id, luna.id] };
+    const est = (await api('/api/lab/estimate', sel)).data;
+    assert.equal(est.runs, 18);
+    assert.equal(est.requests, 6 * (1 + 3 + 1), 'STD02 — один ответ на две реплики, STD10 — три хода');
+    assert.ok(est.low > 0 && est.high > est.low);
+    const r = await api('/api/lab/run', { ...sel, limitUsd: 5, concurrency: 3 });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const job = await waitJob('lab');
+    assert.equal(job.done, 18);
+    assert.equal(job.errors, 0);
+    const c = await counters();
+    assert.equal(c.keys['gpt-6-sol'], 'Bearer sk-sol-test-1234', 'Sol — своим ключом');
+    assert.equal(c.keys['gpt-6-luna'], 'Bearer sk-luna-test-5678', 'Luna — своим ключом');
+    assert.equal(c.send, before.c.send, 'в Авито ничего не отправлено');
+    assert.equal(c.read, before.c.read);
+    const after = { chats: (await api('/api/archive/stats')).data.totalChats, msgs: (await api('/api/archive/stats')).data.totalMessages, leads: (await api('/api/leads?from=2000-01-01')).data.leads.length, runs: (await api('/api/runs?filter=')).data.stats.total };
+    assert.deepEqual(after, { chats: before.chats, msgs: before.msgs, leads: before.leads, runs: before.runs }, 'рабочие чаты, лиды и черновики не тронуты');
+    const runs = (await api('/api/lab/runs?case=STD10')).data.runs;
+    assert.equal(runs.length, 6);
+    for (const x of runs) {
+      assert.equal(x.turns.length, 3, 'три хода диалога');
+      assert.match(x.turns[0].reply, /Ярослав/);
+      assert.doesNotMatch(x.turns[1].reply, /Ярослав/, 'во втором ходе своя история: уже представлялся');
+      assert.ok(x.turns.every((t) => t.reply.includes(x.model)), 'в истории только свои ответы');
+    }
+    const solRun = runs.find((x) => x.model === 'gpt-6-sol');
+    // 3 хода × (4000×$2 + 1000 кэш×$2 (цена кэша не задана) + 300×$10) / 1e6
+    assert.ok(Math.abs(solRun.cost_usd - 0.039) < 1e-9, 'стоимость по usage: ' + solRun.cost_usd);
+    assert.equal(solRun.input_tokens, 15000);
+    assert.equal(solRun.cached_tokens, 3000);
+    assert.equal(solRun.reasoning_tokens, 360);
+    assert.equal(solRun.key_profile, 'Sol');
+    // оценка и сводка по шести комбинациям
+    await api(`/api/lab/runs/${solRun.id}/rate`, { scores: { completeness: 5, accuracy: 4, constraints: 5, naturalness: 4, next_step: 3 }, critical: false, comment: 'ок' });
+    const sum = (await api('/api/lab/summary')).data.summary;
+    assert.equal(sum.length, 6);
+    const row = sum.find((x) => x.lab_model_id === sol.id && x.version_id === solRun.version_id);
+    assert.equal(row.rated, 1);
+    assert.equal(row.overall, 4.2);
+    // экспорт без ключей
+    const exp = await (await fetch(base + '/api/lab/export.json')).text();
+    assert.ok(!exp.includes('sk-sol-test') && !exp.includes('sk-luna-test'));
+    // лимит расхода останавливает прогон; повтор не удаляет прошлые результаты
+    await api('/api/lab/run', { caseIds: ['STD10'], versionIds: cfg.strategies.map((x) => x.id), modelIds: [sol.id], limitUsd: 0.05, concurrency: 1 });
+    const job2 = await waitJob('lab');
+    assert.ok(job2.done < 3 && /лимит/.test(job2.note), job2.note);
+    assert.equal((await api('/api/lab/runs?case=STD10')).data.runs.length, 6 + job2.done);
+    // ошибка модели сохраняется, остальные работают
+    await api('/api/lab/models', { label: 'Сломанная', model: 'broken-model', api: 'responses', key_profile_id: p1, price_in: 1, price_out: 1 });
+    const broken = (await api('/api/lab/config')).data.models.find((x) => x.model === 'broken-model');
+    await api('/api/lab/run', { caseIds: ['FAQ01'], versionIds: [cfg.strategies[0].id], modelIds: [broken.id, luna.id], limitUsd: 1 });
+    const job3 = await waitJob('lab');
+    assert.equal(job3.errors, 1);
+    const fr = (await api('/api/lab/runs?case=FAQ01')).data.runs.filter((x) => x.batch === job3.result.batch);
+    assert.equal(fr.find((x) => x.model === 'broken-model').status, 'error');
+    assert.equal(fr.find((x) => x.model === 'gpt-6-luna').status, 'ok');
+    // модель без Responses API — автоматически через Chat Completions
+    await api('/api/lab/models', { label: 'Только chat', model: 'no-responses-model', api: 'responses', key_profile_id: p2, price_in: 1, price_out: 1 });
+    const nr = (await api('/api/lab/config')).data.models.find((x) => x.model === 'no-responses-model');
+    await api('/api/lab/run', { caseIds: ['FAQ18'], versionIds: [cfg.strategies[2].id], modelIds: [nr.id], limitUsd: 1 });
+    const job4 = await waitJob('lab');
+    assert.equal(job4.errors, 0);
+    const nrRun = (await api('/api/lab/runs?case=FAQ18')).data.runs[0];
+    assert.equal(nrRun.api, 'chat');
+    assert.equal(nrRun.cost_usd, null, 'нет разбивки usage — стоимость неизвестна, а не ноль');
+    assert.equal(nrRun.usage_known, 0);
+    // свой вопрос
+    const cust = await api('/api/lab/case', { text: 'А зимняя резина в подарок?' });
+    assert.ok(cust.data.id.startsWith('CUS'));
   });
 
   await step('песочница с автомобилем из базы', async () => {

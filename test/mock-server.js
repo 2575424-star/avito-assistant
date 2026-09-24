@@ -50,7 +50,7 @@ for (let i = 0; i < 260; i++) {
   });
 }
 
-const counters = { send: 0, read: 0, openai: 0 };
+const counters = { send: 0, read: 0, openai: 0, telegram: 0, keys: {}, responses: 0 };
 
 function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -99,9 +99,27 @@ const server = http.createServer(async (req, res) => {
   if (p === '/feed.xml') { res.writeHead(200, { 'Content-Type': 'application/xml' }); return res.end(FEED); }
 
   // ---- OpenAI ----
+  // ---- OpenAI Responses API (модели «Лаборатории») ----
+  if (p === '/v1/responses') {
+    counters.openai++; counters.responses++;
+    const b = JSON.parse(raw || '{}');
+    counters.keys[b.model] = req.headers.authorization;
+    if (b.model === 'broken-model') return json(res, 404, { error: { message: 'The model does not exist' } });
+    if (b.model === 'no-responses-model') return json(res, 404, { error: { message: 'Unknown url /v1/responses' } });
+    const sys = b.instructions || '';
+    const last = (b.input || []).filter((m) => m.role === 'user').pop()?.content || '';
+    const reply = {
+      reply: `${(b.input || []).some((m) => m.role === 'assistant') ? '' : 'Здравствуйте, меня зовут Ярослав, менеджер отдела продаж. '}Ответ ${b.model} на «${String(last).slice(0, 40)}»${/ПРОВОДНИК/.test(sys) ? ' (проводник)' : ''}.`,
+      phone: null, handoff: false, skip: /Больше не пишите/.test(last),
+    };
+    return json(res, 200, { model: b.model, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(reply) }] }],
+      usage: { input_tokens: 5000, input_tokens_details: { cached_tokens: 1000 }, output_tokens: 300, output_tokens_details: { reasoning_tokens: 120 } } });
+  }
+
   if (p === '/v1/chat/completions') {
     counters.openai++;
     const b = JSON.parse(raw || '{}');
+    counters.keys[b.model] = req.headers.authorization;
     if (b.model === 'bad-model') return json(res, 404, { error: { message: 'model not found' } });
     // модель без JSON-режима: 400 на response_format, без него — отвечает
     if (b.model === 'vendor/no-json' && b.response_format) return json(res, 400, { error: { message: 'response_format is not supported' } });
