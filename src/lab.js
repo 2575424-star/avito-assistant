@@ -98,7 +98,7 @@ function buildPrompt(version, kase, history, item = null) {
   if (version.strategy) parts.push(version.strategy);
   if (item) parts.push('АВТОМОБИЛЬ ИЗ ОБЪЯВЛЕНИЯ (подтверждённые данные):\n' + itemCard(item) + '\n\nФакты ниже (кредит, трейд-ин, сроки, полномочия компании) дополняют карточку.');
   parts.push('ФАКТЫ (считать подтверждёнными на сегодня; null или отсутствие поля — данных нет):\n' + JSON.stringify(facts, null, 1));
-  parts.push(chatstate.cpaPromptLine(chatstate.cpaState(history)));
+  if (!version.key?.startsWith('gpt_egor_')) parts.push(chatstate.cpaPromptLine(chatstate.cpaState(history)));
   parts.push(ADAPTER);
   return parts.join('\n\n');
 }
@@ -190,6 +190,8 @@ async function runOne({ kase, version, model, batch, isStopped, item = null }) {
       history.push({ id: 'a' + history.length, direction: 'out', source: 'bot', type: 'text', text: parsed.reply || '', created: now() });
     } catch (e) {
       status = 'error';
+      // A failed request may still have consumed tokens; never report its usage as zero.
+      totals.known = false; costKnown = false;
       error = llm.scrub(e.message).slice(0, 500);
       turnsOut.push({ client: g.join('\n'), reply: null, error });
       break;

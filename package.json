@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --no-warnings src/server.js",
-    "test": "node --no-warnings test/smoke.js",
+    "test": "node --no-warnings test/smoke.js && node --no-warnings test/gpt-lab.js",
     "mock": "node test/mock-server.js"
   },
   "engines": {

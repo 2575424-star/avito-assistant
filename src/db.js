@@ -358,3 +358,6 @@ if (!getSetting('webhook_secret')) {
 }
 
 module.exports = { db, getSetting, setSetting, allSettings, logEvent, DEFAULTS };
+
+// GPT laboratory reviewer choices; additive migration.
+db.exec('CREATE TABLE IF NOT EXISTS gpt_lab_choices(batch TEXT, case_id TEXT, run_id INTEGER, PRIMARY KEY(batch,case_id))');

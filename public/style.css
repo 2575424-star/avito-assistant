@@ -247,3 +247,8 @@ tr.expand td { background: var(--panel-2); }
   .topbar .spacer { display: none; }
   #modeBadge { order: 3; white-space: normal; }
 }
+
+/* GPT laboratory */
+.gpt-questions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}.gpt-question{display:flex;flex-direction:row;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--border);border-radius:10px;color:var(--text)}.gpt-answer-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.gpt-answer{padding:18px;border:1px solid var(--border);border-radius:12px;min-width:0}.gpt-answer.chosen{border:2px solid var(--green)}.gpt-reply{white-space:pre-wrap;line-height:1.65;overflow-wrap:anywhere}.gpt-facts{white-space:pre-wrap;overflow-wrap:anywhere}.gpt-result-group{margin:24px 0;padding-bottom:24px;border-bottom:1px solid var(--border)}.gpt-answer details{margin-top:14px}.gpt-turn{border-bottom:1px solid var(--border);margin-bottom:14px;padding-bottom:8px}@media(max-width:800px){.gpt-answer-grid,.gpt-questions{grid-template-columns:1fr}}
+
+#gStop[hidden]{display:none}
