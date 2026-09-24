@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Авито Ассистент</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 11h14v8h-8l-4 3v-3H9z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form class="login-card" id="loginForm">
+      <div class="logo-mark big">
+        <svg viewBox="0 0 24 24" width="26" height="26"><path d="M4 6h16v10h-9l-5 4v-4H4z" fill="currentColor"/></svg>
+      </div>
+      <h1>Авито Ассистент</h1>
+      <p class="muted">ИИ-менеджер для чатов Авито</p>
+      <label>Пароль<input type="password" id="loginPassword" autocomplete="current-password" placeholder="Введите пароль"></label>
+      <button class="btn primary wide" type="submit">Войти</button>
+      <div class="error" id="loginError"></div>
+    </form>
+  </div>
+
+  <div id="app" class="layout hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo-mark"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 6h16v10h-9l-5 4v-4H4z" fill="currentColor"/></svg></div>
+        <div><div class="brand-name">Авито Ассистент</div><div class="brand-sub">ИИ для чатов</div></div>
+      </div>
+      <nav class="nav">
+        <div class="nav-title">Работа</div>
+        <a href="#/dashboard" data-nav="dashboard"><span class="ico">▦</span>Дашборд</a>
+        <a href="#/chats" data-nav="chats"><span class="ico">💬</span>Чаты</a>
+        <a href="#/leads" data-nav="leads"><span class="ico">☎</span>Успешные чаты</a>
+        <div class="nav-title">Агент</div>
+        <a href="#/settings/agent" data-nav="settings"><span class="ico">⚙</span>Настройки</a>
+        <a href="#/settings/sandbox" data-nav="sandbox"><span class="ico">🧪</span>Тест агента</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="connState" class="conn"></div>
+        <button class="link" id="logoutBtn">Выйти</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="account">
+          <div class="avatar" id="accAvatar">А</div>
+          <div>
+            <div class="acc-name"><span id="accName">Кабинет Авито</span> <span class="badge blue">Авито</span></div>
+            <div class="muted small" id="accSub">не подключён</div>
+          </div>
+        </div>
+        <div class="ai-switch">
+          <span class="small muted">AI</span>
+          <label class="switch"><input type="checkbox" id="aiGlobal"><span></span></label>
+          <span class="small muted" id="aiSince"></span>
+        </div>
+      </header>
+      <div class="tabs" id="tabs">
+        <a href="#/dashboard" data-tab="dashboard">Дашборд</a>
+        <a href="#/chats" data-tab="chats">Чаты</a>
+        <a href="#/leads" data-tab="leads">Успешные чаты</a>
+        <a href="#/settings/agent" data-tab="settings">Настройки</a>
+      </div>
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

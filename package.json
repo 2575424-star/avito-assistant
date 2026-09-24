@@ -1,0 +1,10 @@
+{
+  "name": "avito-assistant",
+  "version": "0.1.0",
+  "description": "AI-ассистент для чатов Авито",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --no-warnings src/server.js"
+  },
+  "engines": { "node": ">=22.13" }
+}
