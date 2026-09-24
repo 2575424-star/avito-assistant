@@ -542,10 +542,10 @@ async function api(req, res, url) {
     const b = await readBody(req);
     const num = (v) => (v === '' || v == null ? null : Number(v));
     const vals = [b.label?.trim() || b.model, b.model?.trim(), b.api === 'chat' ? 'chat' : 'responses', Number(b.key_profile_id) || null, b.reasoning_effort || null,
-      num(b.max_output_tokens), num(b.price_in), num(b.price_cached_in), num(b.price_out), b.price_version || null];
+      num(b.max_output_tokens), num(b.price_in), num(b.price_cached_in), num(b.price_out), b.price_version || null, b.active === undefined ? 1 : (b.active === false || b.active === '0' || b.active === 0 ? 0 : 1)];
     if (!vals[1]) return send(res, 400, { error: 'Нужно имя модели' });
-    if (b.id) db.prepare('UPDATE lab_models SET label = ?, model = ?, api = ?, key_profile_id = ?, reasoning_effort = ?, max_output_tokens = ?, price_in = ?, price_cached_in = ?, price_out = ?, price_version = ? WHERE id = ?').run(...vals, Number(b.id));
-    else db.prepare('INSERT INTO lab_models(label, model, api, key_profile_id, reasoning_effort, max_output_tokens, price_in, price_cached_in, price_out, price_version, created) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now());
+    if (b.id) db.prepare('UPDATE lab_models SET label = ?, model = ?, api = ?, key_profile_id = ?, reasoning_effort = ?, max_output_tokens = ?, price_in = ?, price_cached_in = ?, price_out = ?, price_version = ?, active = ? WHERE id = ?').run(...vals, Number(b.id));
+    else db.prepare('INSERT INTO lab_models(label, model, api, key_profile_id, reasoning_effort, max_output_tokens, price_in, price_cached_in, price_out, price_version, active, created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now());
     return send(res, 200, { ok: true });
   }
 

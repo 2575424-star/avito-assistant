@@ -1106,6 +1106,7 @@ async function settingsKeys(box) {
         <li>В каждом проекте: <b>API keys → Create new secret key</b>, права — «All» или хотя бы доступ к Responses. Ключ показывается один раз: скопируйте его.</li>
         <li>Ниже добавьте два профиля: «Sol» с первым ключом и «Luna» со вторым. Ключ хранится только на сервере; здесь и в результатах видна маска ••••1234.</li>
         <li>В таблице моделей привяжите GPT-6 Sol к профилю «Sol», GPT-6 Luna — к «Luna». Проверьте цены за 1 млн токенов на openai.com/api/pricing.</li>
+        <li>GPT-4o mini (простая разговорная, на ней работала первая версия) по умолчанию взяла ключ «Luna» — можно оставить или завести ей свой проект и профиль. Ненужную модель скройте в колонке «В Лаборатории».</li>
       </ol>
     </div>
     <div class="card"><h3>Профили ключей</h3>
@@ -1123,7 +1124,7 @@ async function settingsKeys(box) {
     </div>
     <div class="card"><h3>Модели для сравнения</h3>
       <div class="muted small" style="margin-bottom:10px">API «Responses» — основной у OpenAI для новых моделей; если модель его не поддерживает, сервис сам перейдёт на Chat Completions. Температура не передаётся (одинаковые условия). Цена кэша пусто — кэш считается по цене входа, с запасом.</div>
-      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Название</th><th>Модель (API id)</th><th>API</th><th>Ключ</th><th>Reasoning</th><th>$ вход / кэш / выход за 1М</th><th></th></tr></thead><tbody>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Название</th><th>Модель (API id)</th><th>API</th><th>Ключ</th><th>Reasoning</th><th>$ вход / кэш / выход за 1М</th><th>В Лаборатории</th><th></th></tr></thead><tbody>
       ${cfg.models.map((m) => `<tr data-mid="${m.id}">
         <td><input type="text" data-f="label" value="${esc(m.label)}" style="width:120px"></td>
         <td><input type="text" data-f="model" value="${esc(m.model)}" style="width:130px"></td>
@@ -1131,6 +1132,7 @@ async function settingsKeys(box) {
         <td><select data-f="key_profile_id" style="width:auto">${profOpts(m.key_profile_id)}</select></td>
         <td><select data-f="reasoning_effort" style="width:auto">${['', 'minimal', 'low', 'medium', 'high'].map((x) => `<option value="${x}" ${(m.reasoning_effort || '') === x ? 'selected' : ''}>${x || 'по умолчанию'}</option>`).join('')}</select></td>
         <td style="white-space:nowrap"><input type="number" step="0.01" data-f="price_in" value="${m.price_in ?? ''}" style="width:70px"> <input type="number" step="0.01" data-f="price_cached_in" value="${m.price_cached_in ?? ''}" style="width:70px"> <input type="number" step="0.01" data-f="price_out" value="${m.price_out ?? ''}" style="width:70px"></td>
+        <td><select data-f="active" style="width:auto"><option value="1" ${m.active ? 'selected' : ''}>показывать</option><option value="0" ${m.active ? '' : 'selected'}>скрыта</option></select></td>
         <td><button class="btn sm primary" data-savem="${m.id}">Сохранить</button></td></tr>`).join('')}
       </tbody></table></div>
       <div class="muted small" style="margin-top:6px">Версия цен: ${esc(cfg.models[0]?.price_version || '—')}</div>
@@ -1161,7 +1163,7 @@ const usd = (x) => (x == null ? '—' : '$' + (x < 0.01 ? x.toFixed(5) : x.toFix
 
 async function renderLab() {
   const cfg = await api('/api/lab/config');
-  state.lab ||= { set: 'faq', cases: new Set(), models: new Set(cfg.models.filter((m) => /gpt-6/.test(m.model)).map((m) => m.id)), versions: new Set(cfg.strategies.map((s) => s.id)), view: null, blind: false };
+  state.lab ||= { set: 'faq', cases: new Set(), models: new Set(cfg.models.filter((m) => m.active).map((m) => m.id)), versions: new Set(cfg.strategies.map((s) => s.id)), view: null, blind: false };
   const L = state.lab;
   const sets = { standard: 'Стандартные (GPT)', faq: 'Частые вопросы клиентов', custom: 'Свои вопросы' };
   view().innerHTML = `
@@ -1169,7 +1171,7 @@ async function renderLab() {
     <div class="card"><h3>1. Что сравниваем</h3>
       <div class="grid c2">
         <div><b class="small">Стратегии</b> <a class="small" href="#/settings/strategies">редактор и версии →</a><div class="chips" style="margin-top:6px">${cfg.strategies.map((v) => `<label class="chip ${L.versions.has(v.id) ? 'active' : ''}"><input type="checkbox" data-lv="${v.id}" ${L.versions.has(v.id) ? 'checked' : ''} style="display:none">${esc(v.title || v.key)} ${esc(v.version)}</label>`).join('')}</div></div>
-        <div><b class="small">Модели</b> <a class="small" href="#/settings/keys">ключи и цены →</a><div class="chips" style="margin-top:6px">${cfg.models.map((m) => `<label class="chip ${L.models.has(m.id) ? 'active' : ''}"><input type="checkbox" data-lm="${m.id}" ${L.models.has(m.id) ? 'checked' : ''} style="display:none">${esc(m.label)} ${m.profile_name ? '' : '⚠ нет ключа'}</label>`).join('')}</div></div>
+        <div><b class="small">Модели</b> <a class="small" href="#/settings/keys">ключи и цены →</a><div class="chips" style="margin-top:6px">${cfg.models.filter((m) => m.active).map((m) => `<label class="chip ${L.models.has(m.id) ? 'active' : ''}"><input type="checkbox" data-lm="${m.id}" ${L.models.has(m.id) ? 'checked' : ''} style="display:none">${esc(m.label)} ${m.profile_name ? '' : '⚠ нет ключа'}</label>`).join('')}</div></div>
       </div>
       <label style="margin-top:14px">Автомобиль
         <select id="labItem"><option value="">из сценария (Toyota RAV4, условия заданы в вопросе)</option>${cfg.items.map((it) => `<option value="${esc(it.key)}" ${L.item === it.key ? 'selected' : ''}>${esc(it.title)}${it.price ? ' · ' + Number(it.price).toLocaleString('ru-RU') + ' ₽' : ''}${it.availability ? ' · ' + ({ in_stock: 'в наличии', in_transit: 'в пути', on_order: 'под заказ' }[it.availability] || '') : ''}</option>`).join('')}</select>

@@ -15,12 +15,6 @@ keys.forEach((key, i) => db.prepare('INSERT OR IGNORE INTO agent_versions(key,ve
 // Preserve egor-1 snapshots; only the selected version advances.
 keys.forEach((key, i) => db.prepare('INSERT OR IGNORE INTO agent_versions(key,version,title,base_prompt,strategy,status,created) VALUES(?,?,?,?,?,?,?)')
   .run(key, 'egor-2', titles[i], read('egor-2/common.md'), read(i ? 'egor-2/friendly.md' : 'egor-2/formal.md'), 'lab_only', now()));
-// Reuse the former Sol profile for the comparison, without reading or changing its secret.
-if (!lab.models().some(m => m.model === 'gpt-4o-mini')) {
-  const old = lab.models().find(m => m.model === 'gpt-6-sol' && m.key_profile_id);
-  db.prepare('INSERT INTO lab_models(label,model,api,key_profile_id,price_in,price_cached_in,price_out,price_version,created) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run('GPT-4o mini', 'gpt-4o-mini', 'responses', old?.key_profile_id || null, 0.15, 0.075, 0.6, 'OpenAI Standard 2026-09-24', now());
-}
 for (const c of questions) db.prepare('INSERT OR IGNORE INTO lab_cases(id,set_name,version,title,facts,client_turns,turn_mode,expected,created) VALUES(?,?,?,?,?,?,?,?,?)')
   .run(c.id, 'gpt_egor', c.version, c.title, JSON.stringify(c.facts), JSON.stringify(c.client_turns), c.turn_mode, JSON.stringify(c.expected), now());
 
@@ -43,7 +37,6 @@ function start(body) {
   if (!names.length || names.some(name => !c.models.some(m => m.model === name))) throw new Error('Выберите Luna и/или GPT-4o mini');
   const selected = c.models.filter(m => names.includes(m.model));
   if (selected.some(m => !m.ready)) throw new Error('Подключите профиль OpenAI к выбранной модели в настройках «Ключи и модели»');
-  if (new Set(selected.map(m => lab.models().find(x => x.id === m.id).key_profile_id)).size !== selected.length) throw new Error('Для раздельного учёта назначьте моделям разные профили ключей');
   return lab.start({ caseIds: ids, versionIds: c.strategies.map(v => v.id), modelIds: selected.map(m => m.id), repeats: 1, concurrency: 2, limitUsd: 5 }, (_, fn) => history.startJob('gpt_lab', fn), {
     requestParams: model => ({ reasoning_effort: model.model === 'gpt-6-luna' ? 'none' : null, max_output_tokens: 600 })
   });

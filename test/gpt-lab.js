@@ -20,7 +20,7 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
   try {
     assert.equal(gpt.config().strategies.length,2);
     assert.equal(gpt.config().questions.length,16);
-    assert.equal(lab.strategies().length,3,'existing lab unchanged');
+    assert.equal(lab.strategies().length,4,'Claude simple strategy preserved');
     assert.throws(()=>gpt.start({caseIds:['GPT01']}),/ключ/);
     for(const [i,m] of lab.models().entries()) {
       const id=Number(db.prepare('INSERT INTO key_profiles(name,provider,api_key,created) VALUES(?,?,?,?)').run('profile'+i,'openai','sk-fake-'+i,1).lastInsertRowid);
@@ -50,6 +50,11 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
     for(const t of Object.keys(before))assert.equal(db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n,before[t]);
     const solo=gpt.start({caseIds:['GPT01']});while(solo.running)await sleep();
     assert.equal(solo.done,2);assert.ok(gpt.results(solo.batch).runs.every(r=>r.model==='gpt-6-luna'));
+    const cfg=gpt.config();
+    const luna=lab.models().find(m=>m.model==='gpt-6-luna');
+    db.prepare('UPDATE lab_models SET key_profile_id=? WHERE model=?').run(luna.key_profile_id,'gpt-4o-mini');
+    const shared=gpt.start({caseIds:['GPT01'],models:['gpt-6-luna','gpt-4o-mini']});while(shared.running)await sleep();
+    assert.equal(shared.done,4);assert.equal(shared.errors,0,'existing shared profile is supported');
     // Existing Sol results remain visible with their original model and prompt version.
     db.prepare("UPDATE lab_runs SET model='gpt-6-sol',version_id=(SELECT id FROM agent_versions WHERE key='gpt_egor_formal' AND version='egor-1') WHERE id=?").run(first.id);
     assert.ok(gpt.results(job.batch).models.some(m=>m.model==='gpt-6-sol'));

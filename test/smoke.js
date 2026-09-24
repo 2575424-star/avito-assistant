@@ -223,7 +223,7 @@ async function step(name, fn) {
     const v = (await api('/api/agent-versions')).data.versions;
     // решение владельца v0.3.0: A/B/C в архиве (история и прогон по id сохраняются), активны три стратегии лаборатории
     assert.deepEqual(v.filter((x) => x.status === 'archived').map((x) => x.key).sort(), ['A_direct', 'B_consultative', 'C_adaptive']);
-    assert.deepEqual(v.filter((x) => x.status === 'active').map((x) => x.key).sort(), ['claude_independent', 'codex_business', 'codex_friendly']);
+    assert.deepEqual(v.filter((x) => x.status === 'active').map((x) => x.key).sort(), ['claude_independent', 'codex_business', 'codex_friendly', 'simple']);
     const A = v.find((x) => x.key === 'A_direct'), C = v.find((x) => x.key === 'C_adaptive');
     const before = (await api('/api/chats/u2i-chat-3')).data.runs.length;
     const r = await api('/api/chats/u2i-chat-3/replay', { maxTurns: 1, configs: [{ versionId: A.id, model: 'gpt-4o-mini' }, { versionId: C.id, model: 'gpt-4o-mini' }] });
@@ -250,8 +250,10 @@ async function step(name, fn) {
 
   await step('Лаборатория: 3 стратегии × 2 модели, отдельные ключи, расходы, изоляция', async () => {
     const cfg = (await api('/api/lab/config')).data;
-    assert.deepEqual(cfg.strategies.map((x) => x.key), ['codex_business', 'codex_friendly', 'claude_independent'], 'ровно три активные стратегии');
-    assert.deepEqual(cfg.models.map((x) => x.model), ['gpt-6-sol', 'gpt-6-luna', 'gpt-4o-mini']);
+    assert.deepEqual(cfg.strategies.map((x) => x.key), ['codex_business', 'codex_friendly', 'claude_independent', 'simple']);
+    assert.deepEqual(cfg.models.map((x) => [x.model, x.active]), [['gpt-6-sol', 0], ['gpt-6-luna', 1], ['gpt-4o-mini', 1]], 'Sol скрыт, добавлена простая модель');
+    const simple = cfg.strategies.find((x) => x.key === 'simple');
+    cfg.strategies = cfg.strategies.filter((x) => x.key !== 'simple');
     assert.equal(cfg.cases.filter((c) => c.set_name === 'standard').length, 12);
     assert.equal(cfg.cases.filter((c) => c.set_name === 'faq').length, 20);
     const [sol, luna] = cfg.models;
@@ -329,6 +331,16 @@ async function step(name, fn) {
     const fr = (await api('/api/lab/runs?case=FAQ01')).data.runs.filter((x) => x.batch === job3.result.batch);
     assert.equal(fr.find((x) => x.model === 'broken-model').status, 'error');
     assert.equal(fr.find((x) => x.model === 'gpt-6-luna').status, 'ok');
+    // простая стратегия (без общего слоя) на gpt-4o-mini: номер предлагается уже в первом ответе
+    const mini = (await api('/api/lab/config')).data.models.find((x) => x.model === 'gpt-4o-mini');
+    await api('/api/lab/models', { ...mini, key_profile_id: p2 });
+    await api('/api/lab/run', { caseIds: ['FAQ01'], versionIds: [simple.id], modelIds: [mini.id], limitUsd: 1 });
+    const job5 = await waitJob('lab');
+    assert.equal(job5.errors, 0, JSON.stringify(job5));
+    const miniSys = (await counters()).systems['gpt-4o-mini'];
+    assert.match(miniSys, /Уже в первом ответе, если это уместно/);
+    assert.match(miniSys, /Это первый ответ: если уместно, одним сообщением ответь на вопрос и сразу предложи оставить номер/);
+    assert.ok(miniSys.length < 6000, 'короткий промпт без общего слоя: ' + miniSys.length);
     // модель без Responses API — автоматически через Chat Completions
     await api('/api/lab/models', { label: 'Только chat', model: 'no-responses-model', api: 'responses', key_profile_id: p2, price_in: 1, price_out: 1 });
     const nr = (await api('/api/lab/config')).data.models.find((x) => x.model === 'no-responses-model');
