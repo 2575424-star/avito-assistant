@@ -170,6 +170,71 @@ CREATE TABLE IF NOT EXISTS prompt_snapshots (
   created INTEGER
 );
 
+-- «Лаборатория»: изолированное сравнение стратегий и моделей на тестовых сценариях
+CREATE TABLE IF NOT EXISTS key_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  provider TEXT DEFAULT 'openai',   -- openai / openrouter
+  base_url TEXT,
+  api_key TEXT,                     -- секрет: наружу только маска
+  created INTEGER
+);
+CREATE TABLE IF NOT EXISTS lab_models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  model TEXT NOT NULL,
+  api TEXT DEFAULT 'responses',     -- responses / chat
+  key_profile_id INTEGER,
+  reasoning_effort TEXT,
+  max_output_tokens INTEGER,
+  price_in REAL,                    -- USD за 1 млн входных токенов
+  price_cached_in REAL,
+  price_out REAL,
+  price_version TEXT,
+  active INTEGER DEFAULT 1,
+  created INTEGER
+);
+CREATE TABLE IF NOT EXISTS lab_cases (
+  id TEXT PRIMARY KEY,
+  set_name TEXT,                    -- standard / faq / custom
+  version TEXT,
+  title TEXT,
+  facts TEXT,                       -- JSON
+  client_turns TEXT,                -- JSON
+  turn_mode TEXT,
+  expected TEXT,                    -- JSON
+  created INTEGER
+);
+CREATE TABLE IF NOT EXISTS lab_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch TEXT,
+  case_id TEXT,
+  case_version TEXT,
+  version_id INTEGER,
+  lab_model_id INTEGER,
+  model TEXT,
+  api TEXT,
+  params TEXT,
+  key_profile TEXT,                 -- только имя профиля
+  prompt_hash TEXT,
+  turns TEXT,                       -- JSON [{client, reply, parsed, usage, ms, cost, flags}]
+  status TEXT,                      -- ok / error / stopped
+  error TEXT,
+  input_tokens INTEGER, cached_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+  usage_known INTEGER,
+  cost_usd REAL,
+  price_version TEXT,
+  ms INTEGER,
+  flags TEXT,                       -- JSON автопроверок
+  scores TEXT,                      -- JSON оценок владельца
+  critical INTEGER,
+  comment TEXT,
+  correction TEXT,
+  rated_at INTEGER,
+  created INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_lab_runs_case ON lab_runs(case_id, version_id, lab_model_id);
+
 -- фактические целевые действия Авито (списания): чаты и звонки
 CREATE TABLE IF NOT EXISTS cpa_actions (
   id TEXT PRIMARY KEY,          -- 'chat:<actionId>' / 'call:<id>'

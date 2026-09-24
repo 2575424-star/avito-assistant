@@ -10,6 +10,7 @@ const engine = require('./engine');
 const knowledge = require('./knowledge');
 const history = require('./history');
 const billing = require('./billing');
+const lab = require('./lab');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -330,9 +331,9 @@ async function api(req, res, url) {
 
   // ----- фоновые задачи -----
   if (p === '/api/jobs') {
-    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review'), cpa: history.jobState('cpa') });
+    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review'), cpa: history.jobState('cpa'), lab: history.jobState('lab') });
   }
-  mm = p.match(/^\/api\/jobs\/(import|replay|review|cpa)\/stop$/);
+  mm = p.match(/^\/api\/jobs\/(import|replay|review|cpa|lab)\/stop$/);
   if (mm && m === 'POST') { history.stopJob(mm[1]); return send(res, 200, { ok: true }); }
 
   // ----- архив и аналитика менеджеров -----
@@ -448,6 +449,78 @@ async function api(req, res, url) {
   }
   if (mm && m === 'DELETE') {
     db.prepare('DELETE FROM agent_runs WHERE id = ?').run(Number(mm[1]));
+    return send(res, 200, { ok: true });
+  }
+
+  // ----- Лаборатория: стратегии × модели на тестовых сценариях (изолировано от чатов и Авито) -----
+  if (p === '/api/lab/config') {
+    return send(res, 200, { strategies: lab.strategies(), models: lab.models(), profiles: lab.profiles(), cases: lab.cases(), criteria: lab.CRITERIA });
+  }
+  if (p === '/api/lab/estimate' && m === 'POST') {
+    const b = await readBody(req);
+    return send(res, 200, lab.estimate({ caseIds: b.caseIds || [], versionIds: b.versionIds || [], modelIds: (b.modelIds || []).map(Number), repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)) }));
+  }
+  if (p === '/api/lab/run' && m === 'POST') {
+    const b = await readBody(req);
+    try {
+      const job = lab.start({ caseIds: b.caseIds || [], versionIds: b.versionIds || [], modelIds: (b.modelIds || []).map(Number),
+        repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)), concurrency: b.concurrency, limitUsd: b.limitUsd }, history.startJob);
+      return send(res, 200, job);
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/lab/case' && m === 'POST') {
+    const b = await readBody(req);
+    const turns = (Array.isArray(b.client_turns) ? b.client_turns : String(b.text || '').split(/\n\s*\n/)).map((x) => String(x).trim()).filter(Boolean);
+    if (!turns.length) return send(res, 400, { error: 'Нужен текст вопроса клиента' });
+    let facts = {};
+    try { facts = b.facts ? (typeof b.facts === 'string' ? JSON.parse(b.facts) : b.facts) : {}; } catch { return send(res, 400, { error: 'Факты должны быть в формате JSON' }); }
+    const id = 'CUS' + Date.now().toString(36).toUpperCase();
+    db.prepare('INSERT INTO lab_cases(id, set_name, version, title, facts, client_turns, turn_mode, expected, created) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run(id, 'custom', '1', (b.title || turns[0]).slice(0, 80), JSON.stringify(facts), JSON.stringify(turns), b.turn_mode === 'consecutive' ? 'consecutive_messages_one_response' : 'sequential_dialogue', JSON.stringify([]), now());
+    return send(res, 200, { ok: true, id });
+  }
+  if (p === '/api/lab/runs' && m === 'GET') {
+    return send(res, 200, { runs: lab.runs({ caseId: q.get('case') || undefined, batch: q.get('batch') || undefined, limit: Math.min(2000, Number(q.get('limit') || 300)) }) });
+  }
+  mm = p.match(/^\/api\/lab\/runs\/(\d+)\/rate$/);
+  if (mm && m === 'POST') { lab.rate(mm[1], await readBody(req)); return send(res, 200, { ok: true }); }
+  if (p === '/api/lab/summary') {
+    return send(res, 200, { summary: lab.summary({ batch: q.get('batch') || undefined, set: q.get('set') || undefined }) });
+  }
+  if (p === '/api/lab/export.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="lab-results.json"' });
+    return res.end(JSON.stringify(lab.exportAll({ batch: q.get('batch') || undefined }), null, 1));
+  }
+  // профили ключей: секрет только записывается, наружу — маска
+  if (p === '/api/key-profiles' && m === 'GET') return send(res, 200, { profiles: lab.profiles() });
+  if (p === '/api/key-profiles' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.name?.trim()) return send(res, 400, { error: 'Нужно название профиля' });
+    const provider = b.provider === 'openrouter' ? 'openrouter' : 'openai';
+    if (b.id) {
+      db.prepare('UPDATE key_profiles SET name = ?, provider = ?, base_url = ? WHERE id = ?').run(b.name.trim(), provider, b.base_url?.trim() || null, Number(b.id));
+      if (b.api_key && !String(b.api_key).startsWith('••••')) db.prepare('UPDATE key_profiles SET api_key = ? WHERE id = ?').run(String(b.api_key).trim(), Number(b.id));
+      return send(res, 200, { ok: true, id: Number(b.id) });
+    }
+    try {
+      const r = db.prepare('INSERT INTO key_profiles(name, provider, base_url, api_key, created) VALUES(?,?,?,?,?)').run(b.name.trim(), provider, b.base_url?.trim() || null, b.api_key?.trim() || null, now());
+      return send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+    } catch { return send(res, 400, { error: 'Профиль с таким названием уже есть' }); }
+  }
+  mm = p.match(/^\/api\/key-profiles\/(\d+)$/);
+  if (mm && m === 'DELETE') {
+    db.prepare('UPDATE lab_models SET key_profile_id = NULL WHERE key_profile_id = ?').run(Number(mm[1]));
+    db.prepare('DELETE FROM key_profiles WHERE id = ?').run(Number(mm[1]));
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/lab/models' && m === 'POST') {
+    const b = await readBody(req);
+    const num = (v) => (v === '' || v == null ? null : Number(v));
+    const vals = [b.label?.trim() || b.model, b.model?.trim(), b.api === 'chat' ? 'chat' : 'responses', Number(b.key_profile_id) || null, b.reasoning_effort || null,
+      num(b.max_output_tokens), num(b.price_in), num(b.price_cached_in), num(b.price_out), b.price_version || null];
+    if (!vals[1]) return send(res, 400, { error: 'Нужно имя модели' });
+    if (b.id) db.prepare('UPDATE lab_models SET label = ?, model = ?, api = ?, key_profile_id = ?, reasoning_effort = ?, max_output_tokens = ?, price_in = ?, price_cached_in = ?, price_out = ?, price_version = ? WHERE id = ?').run(...vals, Number(b.id));
+    else db.prepare('INSERT INTO lab_models(label, model, api, key_profile_id, reasoning_effort, max_output_tokens, price_in, price_cached_in, price_out, price_version, created) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(...vals, now());
     return send(res, 200, { ok: true });
   }
 
