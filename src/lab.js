@@ -319,6 +319,30 @@ function summary({ batch, set } = {}) {
   }).sort((a, b) => (a.strategy + a.model).localeCompare(b.strategy + b.model));
 }
 
+/** Прогоны (пакеты) — последние сверху. */
+function batches() {
+  return db.prepare(`SELECT batch, MIN(created) created, COUNT(*) runs, COUNT(DISTINCT case_id) cases, SUM(status = 'error') errors, SUM(cost_usd) cost
+    FROM lab_runs GROUP BY batch ORDER BY created DESC LIMIT 100`).all();
+}
+
+/** Ответы таблицей для Excel: одна строка — один ход одной комбинации. */
+function exportCsv({ batch } = {}) {
+  const cs = Object.fromEntries(cases().map((c) => [c.id, c]));
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['Прогон', 'Дата', 'Вопрос', 'Название', 'Стратегия', 'Модель', 'Ход', 'Клиент', 'Ответ', 'Передать менеджеру', 'Промолчал', 'Время, с', 'Токены вход', 'Кэш', 'Выход', 'Reasoning', 'Стоимость прогона, $', 'Автопроверки', 'Оценки', 'Критично', 'Комментарий', 'Как надо'].map(esc).join(';')];
+  for (const r of runs({ batch, limit: 100000 }).reverse()) {
+    const turns = r.turns.length ? r.turns : [{ client: '', reply: r.error }];
+    turns.forEach((t, i) => {
+      lines.push([r.batch, new Date(r.created * 1000).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }), r.case_id, cs[r.case_id]?.title, `${r.v_key} ${r.v_version}`, r.model_label || r.model,
+        i + 1, t.client, t.reply ?? ('ОШИБКА: ' + (t.error || r.error || '')), t.parsed?.handoff ? 'да' : '', t.parsed?.skip ? 'да' : '',
+        t.ms ? (t.ms / 1000).toFixed(1) : '', t.usage?.input, t.usage?.cached, t.usage?.output, t.usage?.reasoning,
+        i === 0 && r.cost_usd != null ? r.cost_usd.toFixed(6).replace('.', ',') : '', (t.flags || []).map((f) => f.text).join('; '),
+        i === 0 && r.scores ? Object.entries(r.scores).map(([k, v]) => `${k}=${v}`).join(', ') : '', i === 0 && r.critical ? 'да' : '', i === 0 ? r.comment : '', i === 0 ? r.correction : ''].map(esc).join(';'));
+    });
+  }
+  return '\ufeff' + lines.join('\n');
+}
+
 /** Экспорт: результаты + конфигурации + сценарии. Ключей в экспорте нет — только имена профилей. */
 function exportAll({ batch } = {}) {
   return {
@@ -332,4 +356,4 @@ function exportAll({ batch } = {}) {
   };
 }
 
-module.exports = { LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };
+module.exports = { batches, exportCsv, LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };

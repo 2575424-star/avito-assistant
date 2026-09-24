@@ -487,6 +487,11 @@ async function api(req, res, url) {
   if (p === '/api/lab/summary') {
     return send(res, 200, { summary: lab.summary({ batch: q.get('batch') || undefined, set: q.get('set') || undefined }) });
   }
+  if (p === '/api/lab/batches') return send(res, 200, { batches: lab.batches() });
+  if (p === '/api/lab/export.csv') {
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="lab-answers.csv"' });
+    return res.end(lab.exportCsv({ batch: q.get('batch') || undefined }));
+  }
   if (p === '/api/lab/export.json') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="lab-results.json"' });
     return res.end(JSON.stringify(lab.exportAll({ batch: q.get('batch') || undefined }), null, 1));
