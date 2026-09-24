@@ -339,6 +339,14 @@ async function step(name, fn) {
     assert.equal(nrRun.api, 'chat');
     assert.equal(nrRun.cost_usd, null, 'нет разбивки usage — стоимость неизвестна, а не ноль');
     assert.equal(nrRun.usage_known, 0);
+    // прогон на реальной машине из базы знаний
+    const labCfg = (await api('/api/lab/config')).data;
+    assert.ok(labCfg.items.some((i) => i.key === '9001'));
+    assert.ok(!JSON.stringify(labCfg.cases).match(/[Уу]чебн/), 'в сценариях нет заглушек «учебный»');
+    await api('/api/lab/run', { caseIds: ['FAQ01'], versionIds: [cfg.strategies[0].id], modelIds: [luna.id], limitUsd: 1, itemKey: '9001' });
+    await waitJob('lab');
+    const carRun = (await api('/api/lab/runs?case=FAQ01')).data.runs[0];
+    assert.equal(carRun.item_title, 'Haval Jolion 1.5 AMT, 2025');
     // свой вопрос
     const cust = await api('/api/lab/case', { text: 'А зимняя резина в подарок?' });
     assert.ok(cust.data.id.startsWith('CUS'));
