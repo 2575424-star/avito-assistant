@@ -17,6 +17,7 @@ const app = spawn(process.execPath, ['--no-warnings', path.join(__dirname, '..',
     ...process.env, PORT: String(APP_PORT), DATA_DIR: dataDir, ADMIN_PASSWORD: '',
     AVITO_API_BASE: `http://127.0.0.1:${MOCK_PORT}`, OPENAI_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`,
     AVITO_CLIENT_ID: 'id', AVITO_CLIENT_SECRET: 'secret', OPENAI_API_KEY: 'sk-test',
+    OPENROUTER_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`, OPENROUTER_API_KEY: 'sk-or-test',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -157,6 +158,26 @@ async function step(name, fn) {
     assert.equal(c.read, 0, 'чаты не отмечены прочитанными');
     const chat = (await api('/api/chats/u2i-chat-5')).data;
     assert.ok(chat.runs.some((x) => x.kind === 'shadow'));
+  });
+
+  await step('несколько моделей отвечают параллельно', async () => {
+    const models = ['gpt-4o-mini', 'openrouter:vendor/no-json', 'bad-model'];
+    const r = await api('/api/chats/u2i-chat-1/replay', { maxTurns: 2, models });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    assert.equal(r.data.turns, 2);
+    assert.equal(r.data.errors, 2, 'ошибка одной модели не ломает прогон');
+    const chat = (await api('/api/chats/u2i-chat-1')).data;
+    assert.equal(chat.runs.length, 6);
+    const noJson = chat.runs.find((x) => x.model === 'openrouter:vendor/no-json');
+    assert.equal(noJson.reply, 'Ответ без JSON-режима');
+    assert.ok(chat.runs.find((x) => x.model === 'bad-model').comment.startsWith('Ошибка'));
+    const runs = (await api('/api/runs?filter=replay')).data;
+    const grp = runs.runs.filter((x) => x.chat_id === 'u2i-chat-1');
+    assert.equal(grp.length, 6, 'группы содержат ответы всех моделей');
+    assert.ok(runs.models.some((m) => m.model === 'openrouter:vendor/no-json' && m.avg_ms !== null));
+    const sb = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Привет' }], models: 'gpt-4o-mini, openrouter:vendor/no-json' });
+    assert.equal(sb.data.variants.length, 2);
+    assert.equal(sb.data.reply.length > 0, true);
   });
 
   await step('песочница с автомобилем из базы', async () => {

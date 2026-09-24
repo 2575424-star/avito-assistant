@@ -382,10 +382,11 @@ function saveRun(chatId, kind, atMsg, result, extra = {}) {
     if (m.direction !== 'in') break;
     block.unshift(m.text);
   }
-  const r = db.prepare(`INSERT INTO agent_runs(chat_id, kind, at_message_id, at_created, client_text, reply, phone, handoff, skip, model, tokens, batch, comment, created)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+  const r = db.prepare(`INSERT INTO agent_runs(chat_id, kind, at_message_id, at_created, client_text, reply, phone, handoff, skip, model, tokens, ms, batch, comment, created)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     chatId, kind, atMsg.id, atMsg.created, block.join('\n') || atMsg.text || '', result.reply || '', result.phone || null,
-    result.handoff ? 1 : 0, result.skip ? 1 : 0, result.model || null, result.usage?.total_tokens || null, extra.batch || null, extra.comment || null, now(),
+    result.handoff ? 1 : 0, result.skip ? 1 : 0, result.model || null, result.usage?.total_tokens || null, result.ms || null,
+    extra.batch || null, extra.comment || null, now(),
   );
   return Number(r.lastInsertRowid);
 }

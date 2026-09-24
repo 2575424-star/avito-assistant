@@ -232,7 +232,9 @@ function replyPoints(messages) {
 }
 
 /** Сгенерировать ответы агента на каждую реплику клиента, не отправляя их. */
-async function replayChat(chatId, { maxTurns = 8, batch = null } = {}) {
+async function replayChat(chatId, { maxTurns = 8, batch = null, models = null } = {}) {
+  // модели: переданные, иначе список для сравнения из настроек, иначе основная модель агента
+  const list = models?.length ? models : agent.compareModels().length ? agent.compareModels() : [null];
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat) throw new Error('Чат не найден');
   const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(chatId);
@@ -240,19 +242,30 @@ async function replayChat(chatId, { maxTurns = 8, batch = null } = {}) {
   // старые неоценённые прогоны заменяем свежими; оценённые оставляем для истории
   db.prepare("DELETE FROM agent_runs WHERE chat_id = ? AND kind = 'replay' AND rating IS NULL AND correction IS NULL").run(chatId);
   let tokens = 0;
+  let errors = 0;
   for (const p of points) {
     const idx = messages.indexOf(p);
     const history = messages.slice(0, idx + 1);
     const clientText = history.filter((m) => m.source === 'client').map((m) => m.text).join('\n');
-    const result = await agent.generateReply({
+    const ctx = {
       item: chat.item_title || chat.item_id ? { id: chat.item_id, title: chat.item_title, price: chat.item_price, url: chat.item_url } : null,
       phone: agent.extractPhone(clientText),
       history,
+    };
+    // все модели отвечают на одно и то же сообщение одновременно
+    const results = await Promise.allSettled(list.map((model) => agent.generateReply(ctx, { model })));
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        tokens += r.value.usage?.total_tokens || 0;
+        engine.saveRun(chatId, 'replay', p, r.value, { batch });
+      } else {
+        errors++;
+        engine.saveRun(chatId, 'replay', p, { model: list[i] || undefined, reply: '' }, { batch, comment: 'Ошибка: ' + r.reason.message.slice(0, 300) });
+      }
     });
-    tokens += result.usage?.total_tokens || 0;
-    engine.saveRun(chatId, 'replay', p, result, { batch });
+    if (errors && errors === results.length * (points.indexOf(p) + 1)) throw new Error(results[0].reason.message);
   }
-  return { turns: points.length, tokens };
+  return { turns: points.length, tokens, models: list.filter(Boolean), errors };
 }
 
 function pickChats({ count = 10, onlyWithSeller = true, onlyLeads = false, order = 'recent', exclude = '' } = {}) {
@@ -275,12 +288,12 @@ function replayBatch(opts = {}) {
     for (const id of ids) {
       if (job.stop) break;
       try {
-        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch });
+        const r = await replayChat(id, { maxTurns: Number(opts.maxTurns) || 4, batch, models: opts.models });
         job.tokens += r.tokens;
       } catch (e) {
         job.errors++;
         logEvent('replay', e.message, id, 'error');
-        if (/OpenAI/.test(e.message) && job.errors >= 3) throw e;
+        if (/OpenAI|OpenRouter|ключ/.test(e.message) && job.errors >= 3) throw e;
       }
       job.done++;
     }
@@ -329,7 +342,7 @@ function reviewBatch(opts = {}) {
       } catch (e) {
         job.errors++;
         logEvent('review', e.message, id, 'error');
-        if (/OpenAI/.test(e.message) && job.errors >= 3) throw e;
+        if (/OpenAI|OpenRouter|ключ/.test(e.message) && job.errors >= 3) throw e;
       }
       job.done++;
     }

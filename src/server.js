@@ -14,7 +14,13 @@ const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const SESSION = ADMIN_PASSWORD ? crypto.createHmac('sha256', ADMIN_PASSWORD).update('avito-assistant-session').digest('hex') : null;
-const SECRET_KEYS = ['avito_client_secret', 'openai_api_key', 'tg_bot_token'];
+const SECRET_KEYS = ['avito_client_secret', 'openai_api_key', 'openrouter_api_key', 'tg_bot_token'];
+
+/** Список моделей из запроса: массив или строка через запятую; пусто — null (берётся из настроек). */
+function modelList(v) {
+  const list = (Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)).map((x) => String(x).trim()).filter(Boolean);
+  return list.length ? [...new Set(list)].slice(0, 6) : null;
+}
 const now = () => Math.floor(Date.now() / 1000);
 
 function publicUrl() {
@@ -210,7 +216,7 @@ async function api(req, res, url) {
     if (action === '/replay' && m === 'POST') {
       const b = await readBody(req);
       try {
-        return send(res, 200, await history.replayChat(id, { maxTurns: Math.min(20, Number(b.maxTurns) || 8) }));
+        return send(res, 200, await history.replayChat(id, { maxTurns: Math.min(20, Number(b.maxTurns) || 8), models: modelList(b.models) }));
       } catch (e) { return send(res, 400, { error: e.message }); }
     }
     if (action === '/review' && m === 'POST') {
@@ -356,7 +362,7 @@ async function api(req, res, url) {
     try {
       return send(res, 200, history.replayBatch({
         count: Math.min(100, Number(b.count) || 10), maxTurns: Math.min(10, Number(b.maxTurns) || 3),
-        order: b.order, onlyLeads: Boolean(b.onlyLeads), skipDone: b.skipDone !== false,
+        order: b.order, onlyLeads: Boolean(b.onlyLeads), skipDone: b.skipDone !== false, models: modelList(b.models),
       }));
     } catch (e) { return send(res, 400, { error: e.message }); }
   }
@@ -369,9 +375,16 @@ async function api(req, res, url) {
       case 'shadow': where.push("r.kind = 'shadow'"); break;
       case 'replay': where.push("r.kind = 'replay'"); break;
     }
+    if (q.get('model')) where.push('r.model = ?');
     const sqlWhere = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const limit = Math.min(300, Number(q.get('limit') || 100));
-    const rows = db.prepare(`SELECT r.*, c.client_name, c.item_title, c.item_price FROM agent_runs r LEFT JOIN chats c ON c.id = r.chat_id ${sqlWhere} ORDER BY r.id DESC LIMIT ?`).all(limit);
+    // группа = одно сообщение клиента; в группу берём ответы всех моделей (последний от каждой)
+    const groups = db.prepare(`SELECT r.chat_id, r.at_message_id, MAX(r.id) mx FROM agent_runs r ${sqlWhere}
+      GROUP BY r.chat_id, r.at_message_id ORDER BY mx DESC LIMIT ?`).all(...(q.get('model') ? [q.get('model')] : []), limit);
+    const groupRuns = db.prepare(`SELECT r.*, c.client_name, c.item_title, c.item_price FROM agent_runs r LEFT JOIN chats c ON c.id = r.chat_id
+      WHERE r.chat_id = ? AND r.at_message_id = ? AND r.id IN (SELECT MAX(id) FROM agent_runs WHERE chat_id = r.chat_id AND at_message_id = r.at_message_id GROUP BY COALESCE(model, ''))
+      ORDER BY r.model`);
+    const rows = groups.flatMap((g) => groupRuns.all(g.chat_id, g.at_message_id));
     const nextOut = db.prepare("SELECT direction, source, text FROM messages WHERE chat_id = ? AND created > ? AND source != 'system' ORDER BY created ASC, rowid ASC LIMIT 6");
     for (const r of rows) {
       const after = nextOut.all(r.chat_id, r.at_created);
@@ -381,7 +394,10 @@ async function api(req, res, url) {
     }
     const stats = db.prepare(`SELECT COUNT(*) total, SUM(rating = 1) good, SUM(rating = -1) bad, SUM(rating IS NULL) unrated,
       SUM(kind = 'shadow') shadow, SUM(kind = 'replay') replay, SUM(tokens) tokens FROM agent_runs`).get();
-    return send(res, 200, { runs: rows, stats });
+    const models = db.prepare(`SELECT model, COUNT(*) total, SUM(rating = 1) good, SUM(rating = -1) bad, SUM(comment LIKE 'Ошибка%') errors,
+      ROUND(AVG(tokens)) avg_tokens, ROUND(AVG(ms)) avg_ms, SUM(handoff) handoffs, SUM(phone IS NOT NULL) phones
+      FROM agent_runs GROUP BY model ORDER BY total DESC`).all();
+    return send(res, 200, { runs: rows, stats, models, compareModels: agent.compareModels(), primaryModel: getSetting('openai_model') });
   }
   mm = p.match(/^\/api\/runs\/(\d+)$/);
   if (mm && m === 'POST') {
@@ -470,6 +486,12 @@ async function api(req, res, url) {
     try {
       const history = (b.history || []).map((x) => ({ direction: x.direction === 'out' ? 'out' : 'in', type: 'text', text: String(x.text || ''), source: x.direction === 'out' ? 'bot' : 'client' }));
       const item = b.item?.id ? { id: Number(b.item.id), title: b.item.title } : b.item?.title ? b.item : null;
+      const models = modelList(b.models);
+      if (models) {
+        const results = await Promise.allSettled(models.map((model) => agent.generateReply({ item, phone: null, history }, { model })));
+        const variants = results.map((x, i) => (x.status === 'fulfilled' ? x.value : { model: models[i], error: x.reason.message }));
+        return send(res, 200, { ...(variants.find((v) => !v.error) || {}), variants });
+      }
       const r = await agent.generateReply({ item, phone: null, history });
       return send(res, 200, r);
     } catch (e) {
