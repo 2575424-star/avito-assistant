@@ -4,7 +4,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const view = () => $('#view');
 
-const state = { status: null, chatFilter: '', chatQuery: '', chatId: null, chatTimer: null, sandbox: [], sandboxItem: { title: '', price: '' } };
+const state = { status: null, chatFilter: '', chatQuery: '', chatId: null, chatTimer: null, timers: [], sandbox: [], sandboxItem: { title: '', price: '', id: '' }, runFilter: 'unrated', kbCat: '' };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -64,6 +64,7 @@ async function loadStatus() {
   $('#accSub').textContent = s.avitoUserId ? `ID продавца ${s.avitoUserId}` : 'Авито не подключён — откройте Настройки → Авито';
   $('#aiGlobal').checked = s.aiEnabled;
   $('#aiSince').textContent = s.aiEnabled && s.aiStartedAt ? 'с ' + fmtDate(s.aiStartedAt) : 'выкл';
+  $('#modeBadge').classList.toggle('hidden', s.sendEnabled);
   const lp = s.lastPoll || {};
   $('#connState').innerHTML = s.avitoConfigured
     ? (lp.ok === false ? `<span style="color:var(--red)">● Ошибка синхронизации</span>` : `<span style="color:var(--green)">●</span> Синхр.: ${lp.at ? fmtTime(lp.at) : '—'}`)
@@ -77,14 +78,16 @@ $('#aiGlobal').addEventListener('change', async (e) => {
     return toast('Сначала подключите Авито и ключ OpenAI в настройках', true);
   }
   await api('/api/ai', { body: { enabled: on } });
-  toast(on ? 'ИИ включён — бот отвечает на новые сообщения' : 'ИИ выключен');
+  toast(on ? (state.status?.sendEnabled ? 'ИИ включён — бот отвечает на новые сообщения' : 'ИИ включён в тестовом режиме: ответы на новые сообщения сохраняются черновиками, в Авито ничего не уходит') : 'ИИ выключен');
   loadStatus();
 });
 
 // ---------- router ----------
-const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings };
+const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings, archive: renderArchive, kb: renderKb, review: renderReview };
 function route() {
   clearInterval(state.chatTimer);
+  state.timers.forEach(clearInterval);
+  state.timers = [];
   const parts = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('/');
   const page = routes[parts[0]] ? parts[0] : 'dashboard';
   $$('[data-tab]').forEach((a) => a.classList.toggle('active', a.dataset.tab === page));
@@ -217,6 +220,10 @@ async function loadChat(id, silent) {
   if (!pane) return;
   const d = await api('/api/chats/' + encodeURIComponent(id));
   const c = d.chat;
+  if ($('.fix-box:not(.hidden)', pane) && silent) return; // не перерисовываем, пока пользователь правит черновик
+  // черновики ИИ показываем после сообщения клиента, на которое они отвечали (последний прогон)
+  const runsByMsg = {};
+  for (const r of d.runs || []) runsByMsg[r.at_message_id] = [r];
   const box = $('.messages', pane);
   const atBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const draft = $('#composerText')?.value || '';
@@ -229,19 +236,25 @@ async function loadChat(id, silent) {
       <span class="spacer"></span>
       ${c.phone ? `<span class="badge green">${esc(c.phone)}</span>` : ''}
       ${c.status === 'manager' ? '<button class="btn sm" id="resumeBot" title="Вернуть чат боту">Вернуть боту</button>' : ''}
-      <button class="btn sm" id="replyNow" title="Сгенерировать и отправить ответ ИИ прямо сейчас">🤖 Ответить ИИ</button>
+      <button class="btn sm" id="replayChat" title="Прогнать ИИ по всей переписке: что бы он ответил на каждое сообщение клиента. В Авито ничего не отправляется.">🧪 Прогнать ИИ</button>
+      <button class="btn sm" id="reviewChat" title="Разбор переписки нейросетью: ошибки продавца, вопросы клиента, как надо было ответить">🔍 Разбор</button>
+      <button class="btn sm" id="replyNow" title="${d.sendEnabled ? 'Сгенерировать и отправить ответ ИИ прямо сейчас' : 'Сгенерировать черновик ответа на последнее сообщение (без отправки)'}">🤖 ${d.sendEnabled ? 'Ответить ИИ' : 'Черновик ИИ'}</button>
       <button class="btn sm" id="syncChat" title="Обновить из Авито">⟳</button>
       <a class="btn sm" target="_blank" rel="noopener" href="https://www.avito.ru/profile/messenger/channel/${encodeURIComponent(c.id)}" title="Открыть на Авито">↗</a>
       ${c.item_url ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(c.item_url)}" title="Объявление">📄</a>` : ''}
       <span class="small muted">AI</span><label class="switch"><input type="checkbox" id="chatAi" ${c.ai_enabled ? 'checked' : ''}><span></span></label>
     </div>
+    ${d.review ? reviewBox(d.review) : ''}
     <div class="messages">${d.messages.map((m) => {
-      if (m.source === 'system') return `<div class="msg system">${esc(m.text)}<div class="meta">Авито · ${fmtTime(m.created)}</div></div>`;
-      return `<div class="msg ${m.direction} ${m.source}">${esc(m.text)}<div class="meta">${SOURCE_LABEL[m.source] || ''} ${fmtTime(m.created)}</div></div>`;
+      const drafts = (runsByMsg[m.id] || []).map(runBubble).join('');
+      if (m.source === 'system') return `<div class="msg system">${esc(m.text)}<div class="meta">Авито · ${fmtTime(m.created)}</div></div>` + drafts;
+      return `<div class="msg ${m.direction} ${m.source}">${esc(m.text)}<div class="meta">${SOURCE_LABEL[m.source] || ''} ${fmtTime(m.created)}</div></div>` + drafts;
     }).join('') || '<div class="empty">Сообщений нет</div>'}</div>
     <div class="composer">
-      <textarea id="composerText" rows="1" placeholder="Написать сообщение от менеджера (бот в этом чате встанет на паузу)…">${esc(draft)}</textarea>
-      <button class="btn primary" id="sendBtn">Отправить</button>
+      ${d.sendEnabled
+        ? `<textarea id="composerText" rows="1" placeholder="Написать сообщение от менеджера (бот в этом чате встанет на паузу)…">${esc(draft)}</textarea>
+      <button class="btn primary" id="sendBtn">Отправить</button>`
+        : '<div class="muted small">Тестовый режим: отвечать из этого окна нельзя. Пунктирные пузыри — черновики ИИ: оцените их 👍/👎 или исправьте, исправления попадут в базу знаний.</div>'}
     </div>`;
   const msgs = $('.messages', pane);
   if (!silent || atBottom) msgs.scrollTop = msgs.scrollHeight;
@@ -249,14 +262,28 @@ async function loadChat(id, silent) {
   $('#chatAi').addEventListener('change', async (e) => { await api(`/api/chats/${encodeURIComponent(id)}/ai`, { body: { enabled: e.target.checked } }); toast(e.target.checked ? 'AI в чате включён' : 'AI в чате выключен'); loadChatList(true); });
   $('#syncChat').addEventListener('click', async () => { try { await api(`/api/chats/${encodeURIComponent(id)}/sync`, { body: {} }); loadChat(id); } catch (e) { toast(e.message, true); } });
   $('#resumeBot')?.addEventListener('click', async () => { await api(`/api/chats/${encodeURIComponent(id)}/status`, { body: { status: 'active' } }); toast('Чат возвращён боту'); loadChat(id); });
-  $('#replyNow').addEventListener('click', async (e) => {
-    e.target.disabled = true; e.target.textContent = '…думает';
-    try {
-      const r = await api(`/api/chats/${encodeURIComponent(id)}/reply-now`, { body: {} });
-      toast(r.sent ? 'Ответ отправлен' : 'Не отправлено: ' + (r.skipped || ''), !r.sent);
-      loadChat(id);
-    } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = '🤖 Ответить ИИ'; }
+  bindRuns(pane, () => loadChat(id, true));
+  const busy = (btn, fn) => btn.addEventListener('click', async () => {
+    const txt = btn.textContent; btn.disabled = true; btn.textContent = '…думает';
+    try { await fn(); } catch (err) { toast(err.message, true); }
+    btn.disabled = false; btn.textContent = txt;
   });
+  busy($('#replyNow'), async () => {
+    const r = await api(`/api/chats/${encodeURIComponent(id)}/reply-now`, { body: {} });
+    if (r.draft !== undefined) toast('Черновик готов — он под последним сообщением клиента');
+    else toast(r.sent ? 'Ответ отправлен' : 'Не отправлено: ' + (r.skipped || ''), !r.sent);
+    loadChat(id);
+  });
+  busy($('#replayChat'), async () => {
+    const r = await api(`/api/chats/${encodeURIComponent(id)}/replay`, { body: { maxTurns: 8 } });
+    toast(`ИИ ответил на ${r.turns} сообщений клиента (${r.tokens} ток.). Сравните с ответами менеджера.`);
+    loadChat(id);
+  });
+  busy($('#reviewChat'), async () => {
+    await api(`/api/chats/${encodeURIComponent(id)}/review`, { body: {} });
+    loadChat(id);
+  });
+  if (!d.sendEnabled) return;
   const send = async () => {
     const text = $('#composerText').value.trim();
     if (!text) return;
@@ -330,6 +357,10 @@ const tog = (name, s, title, help) => `<div class="toggle-row"><label class="swi
 
 function settingsAgent(box, s) {
   box.innerHTML = `
+    <div class="card"><h3>Режим работы</h3>
+      <div class="toggle-row"><label class="switch"><input type="checkbox" id="sendEnabled" ${s.send_enabled === '1' ? 'checked' : ''}><span></span></label>
+        <div><b>Боевой режим: отправлять ответы в Авито</b><div class="muted small">Выключено — тестовый режим: ИИ пишет черновики (видны в чатах и в «Проверке ответов»), в Авито ничего не отправляется и чаты не отмечаются прочитанными. Включайте, только когда ответы устраивают и прежний бот в кабинете отключён.</div></div></div>
+    </div>
     <div class="card"><h3>Основное</h3><div class="form">
       <div class="grid c2">
         <label>Имя AI-консультанта<input type="text" name="assistant_name" value="${esc(s.assistant_name)}"></label>
@@ -338,6 +369,8 @@ function settingsAgent(box, s) {
         <label>Лимит ответов бота в одном чате<input type="number" name="max_bot_replies" value="${esc(s.max_bot_replies)}" min="1"></label>
         <label>Креативность (temperature)<input type="number" step="0.1" min="0" max="1.5" name="temperature" value="${esc(s.temperature)}"></label>
         <label>Отвечать на сообщения не старше, мин<input type="number" name="only_new_messages_min" value="${esc(s.only_new_messages_min)}" min="1"></label>
+        <label>Модель для разбора переписок<input type="text" name="analysis_model" value="${esc(s.analysis_model)}" placeholder="как у агента"><span class="field-help">Для отчётов можно взять модель посильнее агента</span></label>
+        <label>База знаний в промпте, символов<input type="number" name="kb_budget_chars" value="${esc(s.kb_budget_chars)}" min="1000" step="1000"><span class="field-help">Больше — агент знает больше, но ответ дороже</span></label>
       </div>
     </div></div>
 
@@ -354,7 +387,14 @@ function settingsAgent(box, s) {
       <label style="margin-top:6px">Текст быстрого ответа<textarea name="quick_reply_text" rows="3" maxlength="500" placeholder="Здравствуйте! Сейчас посмотрю информацию и отвечу.">${esc(s.quick_reply_text)}</textarea></label>
     </div>
     <div class="row" style="margin-top:16px"><button class="btn primary save">Сохранить</button></div>`;
-  bindSave(box, ['assistant_name', 'openai_model', 'reply_delay_sec', 'max_bot_replies', 'temperature', 'only_new_messages_min', 'rules', 'company_info', 'answer_personal', 'pause_on_manager', 'quick_reply_enabled', 'quick_reply_text']);
+  bindSave(box, ['assistant_name', 'openai_model', 'reply_delay_sec', 'max_bot_replies', 'temperature', 'only_new_messages_min', 'analysis_model', 'kb_budget_chars', 'rules', 'company_info', 'answer_personal', 'pause_on_manager', 'quick_reply_enabled', 'quick_reply_text']);
+  $('#sendEnabled').addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    if (on && !confirm('Включить боевой режим? Бот начнёт отправлять ответы покупателям в Авито от имени кабинета.')) { e.target.checked = false; return; }
+    await api('/api/settings', { body: { send_enabled: on ? '1' : '0' } });
+    toast(on ? 'Боевой режим: ответы уходят в Авито' : 'Тестовый режим: в Авито ничего не отправляется');
+    loadStatus();
+  });
 }
 
 async function settingsTemplates(box) {
@@ -398,7 +438,8 @@ async function settingsTemplates(box) {
   $$('[data-use]', box).forEach((b) => b.addEventListener('click', () => { reset(); $('#tplFlow').value = b.dataset.use; $('#tplReply').focus(); box.scrollIntoView({ behavior: 'smooth' }); }));
 }
 
-function settingsSandbox(box) {
+async function settingsSandbox(box) {
+  const cars = (await api('/api/items').catch(() => ({ items: [] }))).items.filter((x) => x.avito_id);
   const render = () => {
     box.innerHTML = `
       <div class="sandbox">
@@ -413,6 +454,7 @@ function settingsSandbox(box) {
         <div class="card">
           <h3>Объявление для теста</h3>
           <div class="form">
+            ${cars.length ? `<label>Автомобиль из базы знаний<select id="sbCar"><option value="">— ввести вручную —</option>${cars.map((c) => `<option value="${c.avito_id}" ${String(state.sandboxItem.id) === String(c.avito_id) ? 'selected' : ''}>${esc(c.title)}${c.price ? ' · ' + Number(c.price).toLocaleString('ru-RU') + ' ₽' : ''}</option>`).join('')}</select><span class="field-help">Агент увидит полную карточку: описание, комплектацию, VIN</span></label>` : ''}
             <label>Название<input type="text" id="sbTitle" value="${esc(state.sandboxItem.title)}" placeholder="Haval Jolion 1.5 AMT, 2026"></label>
             <label>Цена<input type="text" id="sbPrice" value="${esc(state.sandboxItem.price)}" placeholder="2 199 000 ₽"></label>
             <div class="field-help">Оставьте пустым, чтобы проверить личный чат без объявления.</div>
@@ -422,7 +464,12 @@ function settingsSandbox(box) {
       </div>`;
     const msgs = $('#sbMsgs'); msgs.scrollTop = msgs.scrollHeight;
     $('#sbClear').addEventListener('click', () => { state.sandbox = []; render(); });
-    ['sbTitle', 'sbPrice'].forEach((id) => $('#' + id).addEventListener('input', () => { state.sandboxItem = { title: $('#sbTitle').value, price: $('#sbPrice').value }; }));
+    ['sbTitle', 'sbPrice'].forEach((id) => $('#' + id).addEventListener('input', () => { state.sandboxItem = { ...state.sandboxItem, title: $('#sbTitle').value, price: $('#sbPrice').value }; }));
+    $('#sbCar')?.addEventListener('change', (e) => {
+      const car = cars.find((c) => String(c.avito_id) === e.target.value);
+      state.sandboxItem = car ? { id: car.avito_id, title: car.title, price: car.price ? Number(car.price).toLocaleString('ru-RU') + ' ₽' : '' } : { id: '', title: '', price: '' };
+      render();
+    });
     const send = async () => {
       const text = $('#sbText').value.trim();
       if (!text) return;
@@ -511,6 +558,359 @@ async function settingsLog(box) {
   box.innerHTML = `<div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0">Журнал событий</h3><span class="spacer"></span><button class="btn sm" id="logRefresh">Обновить</button></div>
     ${d.events.map((e) => `<div class="log-item ${e.level}"><span class="muted">${fmtTime(e.ts)}</span><span><span class="badge">${esc(e.type)}</span></span><span>${esc(e.text)} ${e.chat_id ? `<a href="#/chats/${encodeURIComponent(e.chat_id)}">чат →</a>` : ''}</span></div>`).join('') || '<div class="muted">Пока пусто</div>'}</div>`;
   $('#logRefresh').addEventListener('click', () => settingsLog(box));
+}
+
+
+// ---------- черновики ИИ (оценка и исправление) ----------
+const KIND_LABEL = { shadow: 'ответ на живое сообщение', replay: 'прогон по истории' };
+
+function runBubble(r) {
+  const cls = r.rating === 1 ? 'good' : r.rating === -1 ? 'bad' : '';
+  const flags = [r.phone && `<span class="badge green">телефон ${esc(r.phone)}</span>`, r.handoff && '<span class="badge orange">передал бы менеджеру</span>', r.skip && '<span class="badge">промолчал бы</span>', r.comment && `<span class="badge">${esc(r.comment)}</span>`].filter(Boolean).join('');
+  return `<div class="draft ${cls}" data-run="${r.id}">
+    <div class="draft-head">🤖 ИИ ответил бы · ${KIND_LABEL[r.kind] || r.kind} · ${fmtTime(r.created)} ${flags}</div>
+    <div class="draft-text">${esc(r.reply || '(без ответа)')}</div>
+    ${r.correction ? `<div class="draft-fix">✍ Как надо: ${esc(r.correction)}</div>` : ''}
+    <div class="draft-actions">
+      <button class="btn sm ${r.rating === 1 ? 'on' : ''}" data-rate="1" title="Хороший ответ">👍</button>
+      <button class="btn sm ${r.rating === -1 ? 'on' : ''}" data-rate="-1" title="Плохой ответ">👎</button>
+      <button class="btn sm" data-fix>✍ Исправить</button>
+    </div>
+    <div class="fix-box hidden">
+      <textarea rows="3">${esc(r.correction || r.reply || '')}</textarea>
+      <input type="text" data-comment placeholder="Что не так (необязательно): выдумал цену, не попросил телефон…" value="${esc(r.kind === 'shadow' && r.comment?.startsWith('шаблон') ? '' : r.comment || '')}">
+      <label class="small"><input type="checkbox" data-kb checked> Добавить в базу знаний как пример правильного ответа</label>
+      <div class="row"><button class="btn sm primary" data-save>Сохранить</button><button class="btn sm" data-cancel>Отмена</button></div>
+    </div>
+  </div>`;
+}
+
+function bindRuns(root, reload) {
+  $$('[data-run]', root).forEach((el) => {
+    const id = el.dataset.run;
+    $$('[data-rate]', el).forEach((b) => b.addEventListener('click', async () => {
+      const cur = b.classList.contains('on');
+      await api('/api/runs/' + id, { body: { rating: cur ? null : Number(b.dataset.rate) } });
+      if (!cur && b.dataset.rate === '-1') { $('.fix-box', el).classList.remove('hidden'); $('textarea', el).focus(); return; }
+      reload();
+    }));
+    $('[data-fix]', el).addEventListener('click', () => { $('.fix-box', el).classList.toggle('hidden'); $('textarea', el).focus(); });
+    $('[data-cancel]', el).addEventListener('click', () => { $('.fix-box', el).classList.add('hidden'); reload(); });
+    $('[data-save]', el).addEventListener('click', async () => {
+      const correction = $('textarea', el).value.trim();
+      const r = await api('/api/runs/' + id, { body: { correction, comment: $('[data-comment]', el).value.trim(), addToKb: $('[data-kb]', el).checked && Boolean(correction) } });
+      toast(r.kbId ? 'Сохранено и добавлено в базу знаний' : 'Сохранено');
+      $('.fix-box', el).classList.add('hidden');
+      reload();
+    });
+  });
+}
+
+const OUTCOME = { phone: ['green', 'оставил телефон'], call: ['blue', 'договорились о звонке'], lost: ['orange', 'клиент ушёл'], no_answer: ['red', 'нет ответа продавца'], other: ['', 'другое'] };
+const outcomeBadge = (o) => { const [c, t] = OUTCOME[o] || OUTCOME.other; return `<span class="badge ${c}">${t}</span>`; };
+const list = (arr) => (arr && arr.length ? `<ul>${arr.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="muted">—</div>');
+
+function reviewBox(rv) {
+  const x = rv.result || {};
+  return `<details class="review-box" open><summary><b>🔍 Разбор переписки</b> · оценка продавца ${esc(x.score ?? '?')}/10 · ${outcomeBadge(x.outcome)}</summary>
+    <p>${esc(x.summary || '')}</p>
+    <div class="grid c2"><div><b>Ошибки</b>${list(x.mistakes)}</div><div><b>Хорошо</b>${list(x.good)}</div></div>
+    ${x.speed ? `<div><b>Скорость:</b> ${esc(x.speed)}</div>` : ''}
+    ${x.better_reply?.reply ? `<div style="margin-top:8px"><b>Как надо было ответить</b> на «${esc(x.better_reply.client || '')}»:<div class="draft-fix">${esc(x.better_reply.reply)}</div>
+      <button class="btn sm" style="margin-top:6px" onclick="addKb([{category:'example',title:${esc(JSON.stringify(x.better_reply.client || ''))},content:${esc(JSON.stringify(x.better_reply.reply))},source:'analysis'}], this)">+ В базу знаний как пример</button></div>` : ''}
+  </details>`;
+}
+
+async function addKb(entries, btn) {
+  try {
+    await api('/api/kb', { body: { entries } });
+    toast(entries.length > 1 ? `Добавлено в базу знаний: ${entries.length}` : 'Добавлено в базу знаний');
+    if (btn) { btn.disabled = true; btn.textContent = '✓ В базе'; }
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- фоновые задачи ----------
+function jobHtml(j, label) {
+  if (!j) return '';
+  const pct = j.total ? Math.round((j.done / j.total) * 100) : null;
+  return `<div class="progress"><div style="width:${pct ?? (j.running ? 30 : 100)}%"></div></div>
+    <div class="small muted">${j.running ? '⏳ ' + label : j.error ? '⚠ Ошибка: ' + esc(j.error) : '✓ Завершено'} · ${j.done}${j.total ? ' из ' + j.total : ''}
+    ${j.messages !== undefined ? ` · новых сообщений ${j.messages}` : ''}${j.tokens ? ` · ${j.tokens} ток.` : ''}${j.errors ? ` · ошибок ${j.errors}` : ''} ${j.note ? '· ' + esc(j.note) : ''}
+    ${j.running ? `<button class="link" data-stop="${j.type}">остановить</button>` : ''}</div>`;
+}
+
+/** Следить за задачей: обновлять прогресс, по завершении вызвать onDone. */
+function watchJob(type, el, label, onDone) {
+  let wasRunning = false;
+  const tick = async () => {
+    const jobs = await api('/api/jobs').catch(() => ({}));
+    const j = jobs[type];
+    if (!el.isConnected) return;
+    el.innerHTML = jobHtml(j, label);
+    $('[data-stop]', el)?.addEventListener('click', () => api(`/api/jobs/${type}/stop`, { body: {} }));
+    if (j?.running) wasRunning = true;
+    else if (wasRunning) { wasRunning = false; onDone && onDone(j); }
+  };
+  tick();
+  state.timers.push(setInterval(tick, 1500));
+}
+
+const fmtDur = (sec) => {
+  if (sec == null) return '—';
+  if (sec < 60) return sec + ' с';
+  if (sec < 3600) return Math.round(sec / 60) + ' мин';
+  if (sec < 86400) return Math.round((sec / 3600) * 10) / 10 + ' ч';
+  return Math.round((sec / 86400) * 10) / 10 + ' дн';
+};
+
+// ---------- архив и аналитика ----------
+async function renderArchive() {
+  const st = state.status || (await loadStatus());
+  view().innerHTML = `
+    <div class="notice info" style="margin-bottom:16px">Здесь загружается вся переписка кабинета, считается, как работали продавцы, и нейросеть разбирает диалоги: частые вопросы, ошибки, готовые ответы для базы знаний. В Авито ничего не отправляется и не отмечается прочитанным.</div>
+    <div class="card"><h3>1. Загрузка всей истории из Авито</h3>
+      <div class="muted small">Все чаты и все сообщения. Повторный запуск докачивает только изменившиеся чаты. Если Авито ограничит глубину списка, остальное доберётся по объявлениям — для этого сначала загрузите объявления в «Базе знаний».</div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="impStart" ${st.avitoConfigured ? '' : 'disabled'}>⬇ Загрузить всю историю</button>
+        <a class="btn" id="expJsonl" href="/api/archive/export.jsonl">⬇ Выгрузка для анализа (JSONL)</a>
+        <span class="muted small">JSONL: одна строка — один диалог. Подходит для ChatGPT/Claude и аналитики.</span></div>
+      <div id="impJob"></div>
+    </div>
+
+    <div class="card"><div class="row"><h3 style="margin:0">2. Как работали продавцы</h3><span class="spacer"></span>
+      <input type="date" id="stFrom" style="width:auto"> — <input type="date" id="stTo" style="width:auto" value="${dateInput(new Date())}"></div>
+      <div id="stBox" style="margin-top:14px">Загрузка…</div></div>
+
+    <div class="card"><h3>3. Разбор переписок нейросетью</h3>
+      <div class="muted small">Нейросеть читает диалоги как руководитель отдела продаж: что спрашивали клиенты, где продавец ошибся, как надо было ответить. Потом собирает сводный отчёт с правилами и ответами для базы знаний. Примерно 1–3 тыс. токенов на чат.</div>
+      <div class="row" style="margin-top:12px">
+        <label style="flex-direction:row;align-items:center">Чатов <input type="number" id="rvCount" value="30" min="1" max="200" style="width:90px"></label>
+        <select id="rvOrder" style="width:auto"><option value="recent">самые свежие</option><option value="random">случайные</option></select>
+        <label style="flex-direction:row;align-items:center"><input type="checkbox" id="rvLeads"> только где оставили телефон</label>
+        <button class="btn primary" id="rvStart">🔍 Разобрать</button><button class="btn" id="rvReport">Пересобрать отчёт</button></div>
+      <div id="rvJob"></div>
+      <div id="reportBox" class="report" style="margin-top:14px"></div>
+    </div>`;
+  const loadStats = async () => {
+    const qs = `from=${$('#stFrom').value}&to=${$('#stTo').value}`;
+    $('#expJsonl').href = '/api/archive/export.jsonl?' + ($('#stFrom').value ? qs : '');
+    const d = await api('/api/archive/stats?' + ($('#stFrom').value ? qs : `to=${$('#stTo').value}`));
+    $('#stBox').innerHTML = !d.chats ? `<div class="muted">Пока нет входящих чатов в базе (всего чатов: ${d.totalChats}). Загрузите историю.</div>` : `
+      <div class="kpis">
+        <div class="kpi"><span>Входящих чатов</span><b>${d.chats}</b></div>
+        <div class="kpi"><span>Оставили телефон</span><b>${d.leads} · ${d.conversion}%</b></div>
+        <div class="kpi"><span>Без ответа продавца</span><b style="color:${d.unanswered ? 'var(--red)' : 'inherit'}">${d.unanswered}</b></div>
+        <div class="kpi"><span>Продавец просил телефон</span><b>${d.askedPhonePct}%</b></div>
+        <div class="kpi"><span>Первый ответ (медиана)</span><b>${fmtDur(d.medianFirstResponse)}</b></div>
+        <div class="kpi"><span>днём 9–21 / ночью</span><b>${fmtDur(d.medianFirstResponseDay)} / ${fmtDur(d.medianFirstResponseNight)}</b></div>
+        <div class="kpi"><span>Ответ за 5 мин / за час</span><b>${d.within5Pct}% / ${d.within60Pct}%</b></div>
+        <div class="kpi"><span>Ушли после ответа без телефона</span><b>${d.lostAfterReply}</b></div>
+      </div>
+      <div class="muted small" style="margin:10px 0">Загружено полностью: ${d.loadedChats} из ${d.totalChats} чатов, сообщений ${d.totalMessages}. В среднем на чат: клиент ${d.avgClientMsgs}, продавец ${d.avgSellerMsgs} сообщ.
+        ${d.authors.length > 1 ? '<br>Сообщения продавца по авторам (ID сотрудника): ' + d.authors.map((a) => `${esc(a.id)} — ${a.messages}`).join(', ') : ''}
+        <br>Ответы прежнего бота («ИИ Диалоги») Авито не отличает от ответов продавцов — они тоже считаются здесь.</div>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Месяц</th><th>Чатов</th><th>С ответом</th><th>Телефон</th><th>Конверсия</th><th>Первый ответ</th></tr></thead><tbody>
+        ${d.months.map((m) => `<tr><td>${m.month}</td><td>${m.chats}</td><td>${m.answered}</td><td>${m.leads}</td><td>${m.conversion}%</td><td>${fmtDur(m.medianFirstResponse)}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  };
+  const loadReport = async () => {
+    const d = await api('/api/archive/reports');
+    const r = d.report?.result;
+    const box = $('#reportBox');
+    if (!box) return;
+    box.innerHTML = (r ? `
+      <div class="row"><h3 style="margin:0">Сводный отчёт</h3><span class="muted small">${fmtTime(d.report.created)} · чатов ${d.report.n_chats} · средняя оценка продавцов ${r.stats?.avgScore ?? '—'}/10</span></div>
+      <p>${esc(r.overview || '')}</p>
+      <div class="row">${Object.entries(r.stats?.outcomes || {}).map(([k, v]) => outcomeBadge(k).replace('</span>', `: ${v}</span>`)).join('')}</div>
+      <div class="grid c2">
+        <div><h4>Частые вопросы клиентов</h4>${list((r.top_questions || []).map((x) => `${x.question} — ${x.count}`))}</div>
+        <div><h4>Типичные ошибки → как должен действовать ИИ</h4>${list((r.mistakes || []).map((x) => `${x.mistake} (${x.count}) → ${x.fix}`))}</div>
+      </div>
+      <h4>Удачные приёмы</h4>${list(r.good_practices)}
+      ${r.rules ? `<h4>Предлагаемые правила для агента</h4><pre class="prompt">${esc(r.rules)}</pre>
+        <div class="row" style="margin-top:8px"><button class="btn sm" id="addRules">+ Добавить в правила ответа</button><button class="btn sm" id="addRulesKb">+ В базу знаний как правила</button></div>` : ''}
+      ${(r.faq || []).length ? `<h4>Ответы для базы знаний (из переписок)</h4>
+        <div class="muted small">Проверьте факты перед добавлением: нейросеть взяла их из ответов продавцов.</div>
+        ${r.faq.map((f, i) => `<div class="kb-item"><div><div class="kb-title">${esc(f.q)}</div><div class="kb-content">${esc(f.a)}</div></div><button class="btn sm" data-faq="${i}">+ В базу</button></div>`).join('')}
+        <button class="btn sm" id="addAllFaq">+ Добавить все</button>` : ''}` : '<div class="muted">Отчёта пока нет.</div>') +
+      (d.reviews.length ? `<h4 style="margin-top:18px">Разобранные чаты (${d.reviews.length})</h4>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Клиент</th><th>Оценка</th><th>Итог</th><th>Суть</th><th>Ошибки</th><th></th></tr></thead><tbody>
+      ${d.reviews.map((x) => `<tr><td><b>${esc(x.client_name || 'Покупатель')}</b><div class="small muted">${esc(x.item_title || '')}</div></td><td>${x.score ?? '—'}</td><td>${outcomeBadge(x.outcome)}</td>
+        <td class="small">${esc(x.summary || '')}</td><td class="small">${esc(x.mistakes.slice(0, 2).join('; '))}</td><td><a href="#/chats/${encodeURIComponent(x.chat_id)}">чат →</a></td></tr>`).join('')}
+      </tbody></table></div>` : '');
+    $('#addRules')?.addEventListener('click', async (e) => { await api('/api/rules/append', { body: { text: r.rules } }); toast('Добавлено в Настройки → Агент → Правила'); e.target.disabled = true; });
+    $('#addRulesKb')?.addEventListener('click', (e) => addKb([{ category: 'rules', title: 'Правила по разбору переписок', content: r.rules, source: 'analysis' }], e.target));
+    $$('[data-faq]', box).forEach((b) => b.addEventListener('click', () => { const f = r.faq[Number(b.dataset.faq)]; addKb([{ category: 'faq', title: f.q, content: f.a, source: 'analysis' }], b); }));
+    $('#addAllFaq')?.addEventListener('click', (e) => addKb(r.faq.map((f) => ({ category: 'faq', title: f.q, content: f.a, source: 'analysis' })), e.target));
+  };
+  $('#stFrom').addEventListener('change', loadStats);
+  $('#stTo').addEventListener('change', loadStats);
+  $('#impStart').addEventListener('click', async () => {
+    try { await api('/api/archive/import', { body: {} }); toast('Загрузка истории запущена'); } catch (e) { toast(e.message, true); }
+  });
+  $('#rvStart').addEventListener('click', async () => {
+    try { await api('/api/archive/review', { body: { count: Number($('#rvCount').value), order: $('#rvOrder').value, onlyLeads: $('#rvLeads').checked } }); toast('Разбор запущен'); } catch (e) { toast(e.message, true); }
+  });
+  $('#rvReport').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await api('/api/archive/report', { body: {} }); await loadReport(); toast('Отчёт пересобран'); } catch (err) { toast(err.message, true); }
+    e.target.disabled = false;
+  });
+  watchJob('import', $('#impJob'), 'Загружаю историю…', () => { loadStats(); loadStatus(); });
+  watchJob('review', $('#rvJob'), 'Разбираю переписки…', loadReport);
+  await Promise.all([loadStats(), loadReport()]);
+}
+
+// ---------- база знаний ----------
+const KB_HELP = {
+  faq: ['Вопрос клиента', 'Ответ', 'Частые вопросы: кредит, трейд-ин, тест-драйв, комплектации, сроки.'],
+  company: ['Тема', 'Факты', 'Адрес, часы работы, условия кредита и трейд-ина, акции, гарантия — то, что агент может говорить уверенно.'],
+  objections: ['Что говорит клиент', 'Как отвечать', '«Дорого», «Подумаю», «Не хочу давать телефон», «У конкурентов дешевле».'],
+  rules: ['Название', 'Правило', 'Что можно и нельзя: не называть ставку кредита, не обещать скидку без менеджера…'],
+  example: ['Сообщение клиента', 'Правильный ответ', 'Образцы ответов. Сюда же попадают ваши исправления черновиков ИИ.'],
+};
+
+async function renderKb(parts) {
+  const sub = parts[0] === 'cars' ? 'cars' : 'entries';
+  view().innerHTML = `<div class="subtabs"><a href="#/kb" class="${sub === 'entries' ? 'active' : ''}">Знания</a><a href="#/kb/cars" class="${sub === 'cars' ? 'active' : ''}">Автомобили</a></div><div id="sub"></div>`;
+  return sub === 'cars' ? kbCars($('#sub')) : kbEntries($('#sub'));
+}
+
+async function kbEntries(box) {
+  const d = await api('/api/kb');
+  const cats = d.categories;
+  const counts = {};
+  for (const e of d.entries) counts[e.category] = (counts[e.category] || 0) + 1;
+  const shown = d.entries.filter((e) => !state.kbCat || e.category === state.kbCat);
+  box.innerHTML = `
+    <div class="notice info" style="margin-bottom:16px">Всё, что здесь включено, агент получает вместе с правилами ответа и карточкой автомобиля. Если база станет большой, в промпт попадут записи, ближе всего подходящие к вопросу клиента. Проверяйте результат в «Тест агента» или прогоном по реальным чатам.</div>
+    <div class="card"><h3 id="kbFormTitle">Новая запись</h3><div class="form">
+      <input type="hidden" id="kbId">
+      <div class="grid c2">
+        <label>Тип<select id="kbCat">${Object.entries(cats).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+        <label><span id="kbTitleLbl">Вопрос клиента</span><input type="text" id="kbTitle"></label>
+      </div>
+      <label><span id="kbContentLbl">Ответ</span><textarea id="kbContent" rows="4"></textarea><span class="field-help" id="kbHelp"></span></label>
+      <div class="row"><button class="btn primary" id="kbSave">Сохранить</button><button class="btn" id="kbReset">Очистить</button></div>
+    </div></div>
+    <div class="card"><div class="row" style="margin-bottom:8px"><h3 style="margin:0">Записи</h3><span class="spacer"></span>
+      <div class="chips"><button class="chip ${!state.kbCat ? 'active' : ''}" data-cat="">Все ${d.entries.length}</button>${Object.entries(cats).map(([k, v]) => `<button class="chip ${state.kbCat === k ? 'active' : ''}" data-cat="${k}">${v} ${counts[k] || 0}</button>`).join('')}</div></div>
+      ${shown.map((e) => `<div class="kb-item ${e.enabled ? '' : 'off'}">
+        <div><span class="badge">${esc(cats[e.category] || e.category)}</span> ${e.source && e.source !== 'manual' ? `<span class="badge blue">${e.source === 'correction' ? 'из исправлений' : 'из разбора'}</span>` : ''}
+          ${e.title ? `<div class="kb-title" style="margin-top:6px">${esc(e.title)}</div>` : ''}<div class="kb-content">${esc(e.content)}</div></div>
+        <div class="row" style="align-items:flex-start;flex-wrap:nowrap">
+          <label class="switch" title="Включена"><input type="checkbox" data-on="${e.id}" ${e.enabled ? 'checked' : ''}><span></span></label>
+          <button class="btn sm" data-edit="${e.id}">Изменить</button><button class="btn sm danger" data-del="${e.id}">✕</button></div>
+      </div>`).join('') || '<div class="muted">Пока пусто. Добавьте факты вручную или возьмите их из отчёта в «Архиве».</div>'}
+    </div>`;
+  const setHelp = () => { const h = KB_HELP[$('#kbCat').value]; $('#kbTitleLbl').textContent = h[0]; $('#kbContentLbl').textContent = h[1]; $('#kbHelp').textContent = h[2]; };
+  $('#kbCat').addEventListener('change', setHelp);
+  if (state.kbCat) $('#kbCat').value = state.kbCat;
+  setHelp();
+  const reset = () => { $('#kbId').value = ''; $('#kbTitle').value = ''; $('#kbContent').value = ''; $('#kbFormTitle').textContent = 'Новая запись'; };
+  $('#kbReset').addEventListener('click', reset);
+  $('#kbSave').addEventListener('click', async () => {
+    try {
+      await api('/api/kb', { body: { id: Number($('#kbId').value) || undefined, category: $('#kbCat').value, title: $('#kbTitle').value, content: $('#kbContent').value } });
+      toast('Сохранено'); kbEntries(box);
+    } catch (e) { toast(e.message, true); }
+  });
+  $$('[data-cat]', box).forEach((b) => b.addEventListener('click', () => { state.kbCat = b.dataset.cat; kbEntries(box); }));
+  $$('[data-edit]', box).forEach((b) => b.addEventListener('click', () => {
+    const e = d.entries.find((x) => x.id === Number(b.dataset.edit));
+    $('#kbId').value = e.id; $('#kbCat').value = e.category; $('#kbTitle').value = e.title || ''; $('#kbContent').value = e.content;
+    $('#kbFormTitle').textContent = 'Запись #' + e.id; setHelp(); view().scrollTo({ top: 0, behavior: 'smooth' });
+  }));
+  $$('[data-on]', box).forEach((b) => b.addEventListener('change', async () => {
+    const e = d.entries.find((x) => x.id === Number(b.dataset.on));
+    await api('/api/kb', { body: { ...e, enabled: b.checked } }); kbEntries(box);
+  }));
+  $$('[data-del]', box).forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Удалить запись?')) return;
+    await api('/api/kb/' + b.dataset.del, { method: 'DELETE' }); kbEntries(box);
+  }));
+}
+
+const ITEM_STATUS = { active: 'в продаже', old: 'снято', removed: 'удалено', blocked: 'заблокировано', rejected: 'отклонено' };
+
+async function kbCars(box, query = '') {
+  const d = await api('/api/items?q=' + encodeURIComponent(query));
+  const st = d.stats || {};
+  box.innerHTML = `
+    <div class="card"><h3>Откуда берутся автомобили</h3>
+      <div class="muted small">Из Авито API приходят название, цена, статус и ссылка. Полное описание, комплектация, VIN и пробег есть только в XML-фиде автозагрузки — его адрес можно взять из профиля автозагрузки Авито автоматически. Агент видит карточку машины, по которой пишет клиент, и короткий список остальных машин в продаже.</div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="itApi">⬇ Объявления из Авито</button></div>
+      <div class="row" style="margin-top:12px"><input type="text" id="feedUrl" value="${esc(d.feedUrl || '')}" placeholder="URL XML-фида (пусто — взять из профиля автозагрузки Авито)" style="flex:1;min-width:260px"><button class="btn" id="itFeed">⬇ Загрузить фид</button></div>
+      <div class="muted small" style="margin-top:10px">В базе: ${st.total || 0} · в продаже ${st.active || 0} · с описанием ${st.with_desc || 0} · из фида ${st.from_feed || 0}</div>
+    </div>
+    <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0">Автомобили</h3><span class="spacer"></span><input type="search" id="itQ" placeholder="Название, VIN, ID" value="${esc(query)}" style="max-width:260px"></div>
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Автомобиль</th><th>Цена</th><th>Статус</th><th>VIN / пробег</th><th>Описание</th><th>Чатов</th><th></th></tr></thead><tbody>
+      ${d.items.map((it) => `<tr data-key="${esc(it.key)}"><td><b>${esc(it.title)}</b><div class="small muted">${it.avito_id ? 'ID ' + it.avito_id : 'только в фиде'}${it.ad_id ? ' · фид ' + esc(it.ad_id) : ''}</div></td>
+        <td>${it.price ? Number(it.price).toLocaleString('ru-RU') + ' ₽' : '—'}</td>
+        <td><span class="badge ${it.status === 'active' ? 'green' : ''}">${esc(ITEM_STATUS[it.status] || it.status || 'из фида')}</span></td>
+        <td class="small">${esc(it.vin || '—')}${it.mileage ? '<br>' + esc(it.mileage) + ' км' : ''}</td>
+        <td>${it.desc_len ? `<span class="badge green">есть</span>` : '<span class="badge">нет</span>'}</td>
+        <td>${it.chats || 0}</td>
+        <td style="white-space:nowrap"><button class="btn sm" data-card="${esc(it.key)}">Как видит агент</button> ${it.url ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(it.url)}">↗</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">Автомобилей пока нет — загрузите объявления или фид.</td></tr>'}
+      </tbody></table></div></div>`;
+  const run = (sel, fn) => $(sel).addEventListener('click', async (e) => {
+    const b = e.target; const t = b.textContent; b.disabled = true; b.textContent = '…';
+    try { await fn(); } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = t; }
+  });
+  run('#itApi', async () => { const r = await api('/api/items/import-api', { body: {} }); toast(`Загружено объявлений: ${r.count}`); kbCars(box); });
+  run('#itFeed', async () => { const r = await api('/api/items/import-feed', { body: { url: $('#feedUrl').value.trim() } }); toast(`Фид: ${r.count} объявлений, сопоставлено с Авито ${r.mapped}`); kbCars(box); });
+  let t;
+  $('#itQ').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => kbCars(box, e.target.value).then(() => { const q = $('#itQ'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }), 350); });
+  $$('[data-card]', box).forEach((b) => b.addEventListener('click', async () => {
+    const tr = b.closest('tr');
+    if (tr.nextElementSibling?.classList.contains('expand')) return tr.nextElementSibling.remove();
+    const r = await api('/api/items/' + encodeURIComponent(b.dataset.card));
+    tr.insertAdjacentHTML('afterend', `<tr class="expand"><td colspan="7"><pre class="prompt">${esc(r.card)}</pre></td></tr>`);
+  }));
+}
+
+// ---------- проверка ответов ----------
+const RUN_FILTERS = [['unrated', 'Не оценены'], ['', 'Все'], ['bad', '👎 Плохие'], ['good', '👍 Хорошие'], ['replay', 'Прогон по истории'], ['shadow', 'На живые сообщения']];
+
+async function renderReview() {
+  view().innerHTML = `
+    <div class="notice info" style="margin-bottom:16px">Агент отвечает на реальные сообщения клиентов из истории — так же, как ответил бы сейчас, с текущими правилами и базой знаний. Рядом ответ продавца. Ставьте 👍/👎 и исправляйте: исправления становятся примерами в базе знаний. После правок прогоните снова и сравните.</div>
+    <div class="card"><h3>Прогнать агента по реальным чатам</h3>
+      <div class="row">
+        <label style="flex-direction:row;align-items:center">Чатов <input type="number" id="rbCount" value="10" min="1" max="100" style="width:80px"></label>
+        <label style="flex-direction:row;align-items:center">Ответов на чат <input type="number" id="rbTurns" value="3" min="1" max="10" style="width:70px"></label>
+        <select id="rbOrder" style="width:auto"><option value="recent">самые свежие</option><option value="random">случайные</option></select>
+        <label style="flex-direction:row;align-items:center"><input type="checkbox" id="rbLeads"> только где оставили телефон</label>
+        <label style="flex-direction:row;align-items:center"><input type="checkbox" id="rbSkip" checked> пропускать уже прогнанные</label>
+        <button class="btn primary" id="rbStart">🧪 Прогнать</button>
+      </div>
+      <div id="rbJob"></div>
+    </div>
+    <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0">Ответы агента</h3><span class="spacer"></span><span class="small muted" id="runStats"></span></div>
+      <div class="chips" style="margin-bottom:12px">${RUN_FILTERS.map(([k, l]) => `<button class="chip ${state.runFilter === k ? 'active' : ''}" data-rf="${k}">${l}</button>`).join('')}</div>
+      <div id="runList">Загрузка…</div></div>`;
+  const load = async () => {
+    const d = await api('/api/runs?limit=150&filter=' + state.runFilter);
+    const s = d.stats;
+    const rated = (s.good || 0) + (s.bad || 0);
+    $('#runStats').textContent = `всего ${s.total || 0} · 👍 ${s.good || 0} · 👎 ${s.bad || 0} · не оценено ${s.unrated || 0}${rated ? ` · доля хороших ${Math.round(((s.good || 0) / rated) * 100)}%` : ''}${s.tokens ? ` · ${s.tokens} ток.` : ''}`;
+    const box = $('#runList');
+    box.innerHTML = d.runs.map((r) => `
+      <div style="border-top:1px solid var(--border);padding:14px 0">
+        <div class="row small"><b>${esc(r.client_name || 'Покупатель')}</b><span class="muted">${esc(r.item_title || 'личный чат')}${r.item_price ? ' · ' + esc(r.item_price) : ''}</span><span class="spacer"></span><a href="#/chats/${encodeURIComponent(r.chat_id)}">весь чат →</a></div>
+        <div class="client-says" style="margin-top:8px"><span class="small muted">Клиент · ${fmtTime(r.at_created)}</span><br>${esc(r.client_text)}</div>
+        <div class="compare">${runBubble(r)}<div class="actual"><div class="draft-head">👤 Продавец ответил</div>${r.actual ? esc(r.actual) : '<span class="muted">не ответил</span>'}</div></div>
+      </div>`).join('') || '<div class="muted">Пока пусто. Загрузите историю в «Архиве» и запустите прогон.</div>';
+    bindRuns(box, load);
+  };
+  $$('[data-rf]').forEach((b) => b.addEventListener('click', () => { state.runFilter = b.dataset.rf; $$('[data-rf]').forEach((x) => x.classList.toggle('active', x === b)); load(); }));
+  $('#rbStart').addEventListener('click', async () => {
+    try {
+      await api('/api/replay-batch', { body: { count: Number($('#rbCount').value), maxTurns: Number($('#rbTurns').value), order: $('#rbOrder').value, onlyLeads: $('#rbLeads').checked, skipDone: $('#rbSkip').checked } });
+      toast('Прогон запущен');
+    } catch (e) { toast(e.message, true); }
+  });
+  watchJob('replay', $('#rbJob'), 'Агент отвечает на сообщения клиентов…', load);
+  await load();
 }
 
 // ---------- boot ----------

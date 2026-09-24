@@ -76,6 +76,78 @@ CREATE TABLE IF NOT EXISTS system_seen (
   last_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS items (
+  key TEXT PRIMARY KEY,         -- avito_id строкой или 'feed:<Id из фида>'
+  avito_id INTEGER,
+  ad_id TEXT,                   -- Id объявления в фиде автозагрузки
+  title TEXT,
+  price INTEGER,
+  url TEXT,
+  status TEXT,
+  address TEXT,
+  category TEXT,
+  vin TEXT,
+  year TEXT,
+  mileage TEXT,
+  description TEXT,
+  params TEXT,                  -- JSON: все поля из фида
+  source TEXT,                  -- api / feed / api+feed
+  updated INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_items_avito ON items(avito_id);
+
+CREATE TABLE IF NOT EXISTS kb (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT NOT NULL,       -- faq / company / rules / objections / example
+  title TEXT,
+  content TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  source TEXT,                  -- manual / analysis / correction
+  created INTEGER,
+  updated INTEGER
+);
+
+-- ответы, которые агент сгенерировал, но НЕ отправил: теневой режим и прогон по реальным чатам
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  kind TEXT,                    -- shadow (на живое сообщение) / replay (прогон по истории)
+  at_message_id TEXT,           -- последнее сообщение клиента, на которое отвечал агент
+  at_created INTEGER,
+  client_text TEXT,
+  reply TEXT,
+  phone TEXT,
+  handoff INTEGER,
+  skip INTEGER,
+  rating INTEGER,               -- 1 хорошо / -1 плохо / NULL не оценено
+  correction TEXT,
+  comment TEXT,
+  model TEXT,
+  tokens INTEGER,
+  batch TEXT,
+  created INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_runs_chat ON agent_runs(chat_id, at_created);
+
+-- разбор переписок менеджеров нейросетью
+CREATE TABLE IF NOT EXISTS chat_reviews (
+  chat_id TEXT PRIMARY KEY,
+  score INTEGER,
+  outcome TEXT,
+  result TEXT,                  -- JSON
+  model TEXT,
+  tokens INTEGER,
+  created INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  n_chats INTEGER,
+  result TEXT,                  -- JSON
+  model TEXT,
+  created INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER,
@@ -116,6 +188,10 @@ const DEFAULTS = {
   webhook_secret: '',
   poll_interval_sec: '30',
   pause_on_manager: '1',
+  send_enabled: '0',          // 0 — тестовый режим: в Авито ничего не отправляется
+  feed_url: '',               // XML-фид автозагрузки с автомобилями
+  kb_budget_chars: '16000',   // сколько символов базы знаний класть в промпт
+  analysis_model: '',         // модель для разбора чатов (пусто — как у агента)
 };
 
 const getStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
@@ -147,6 +223,12 @@ function logEvent(type, text, chatId = null, level = 'info') {
   } catch (e) { /* ignore */ }
   const line = `[${level}] ${type}${chatId ? ' ' + chatId : ''}: ${text}`;
   level === 'error' ? console.error(line) : console.log(line);
+}
+
+// миграции для баз, созданных до появления колонок
+for (const [table, col, def] of [['chats', 'history_loaded', 'INTEGER DEFAULT 0']]) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
 }
 
 if (!getSetting('webhook_secret')) {
