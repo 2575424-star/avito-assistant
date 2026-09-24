@@ -9,6 +9,7 @@ const agent = require('./agent');
 const engine = require('./engine');
 const knowledge = require('./knowledge');
 const history = require('./history');
+const billing = require('./billing');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -320,9 +321,9 @@ async function api(req, res, url) {
 
   // ----- фоновые задачи -----
   if (p === '/api/jobs') {
-    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review') });
+    return send(res, 200, { import: history.jobState('import'), replay: history.jobState('replay'), review: history.jobState('review'), cpa: history.jobState('cpa') });
   }
-  mm = p.match(/^\/api\/jobs\/(import|replay|review)\/stop$/);
+  mm = p.match(/^\/api\/jobs\/(import|replay|review|cpa)\/stop$/);
   if (mm && m === 'POST') { history.stopJob(mm[1]); return send(res, 200, { ok: true }); }
 
   // ----- архив и аналитика менеджеров -----
@@ -330,6 +331,18 @@ async function api(req, res, url) {
     const b = await readBody(req);
     if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
     try { return send(res, 200, history.importHistory({ maxChats: Number(b.maxChats) || 100000 })); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  // ----- расходы Авито (целевые действия) -----
+  if (p === '/api/cpa/import' && m === 'POST') {
+    const b = await readBody(req);
+    if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
+    try {
+      return send(res, 200, history.startJob('cpa', (job) => billing.importCpa({ days: Math.min(180, Number(b.days) || 60), calls: b.calls !== false }, job)));
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/cpa/report') {
+    const { from, to } = periodFromQuery(q);
+    return send(res, 200, billing.report(q.get('from') ? from : 0, to));
   }
   if (p === '/api/archive/recount' && m === 'POST') {
     return send(res, 200, history.recountLeads());

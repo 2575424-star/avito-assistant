@@ -174,6 +174,23 @@ async function step(name, fn) {
     assert.ok(chat.runs.some((x) => x.kind === 'shadow'));
   });
 
+  await step('расходы Авито: списания, стоимость телефона, кандидаты на опротестование', async () => {
+    const r = await api('/api/cpa/import', { days: 60 });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const job = await waitJob('cpa');
+    assert.ok(!job.error, job.error);
+    assert.equal(job.result.chats, 54);
+    assert.equal(job.result.calls, 1);
+    const rep = (await api('/api/cpa/report')).data;
+    assert.equal(rep.chats.n, 54);
+    assert.equal(rep.withPhone, 52);
+    assert.equal(rep.noPhoneCount, 2, 'длинные чаты без телефона оплачены впустую');
+    assert.equal(rep.triggerSide['клиент'], 54);
+    // в моке один и тот же номер в чатах 0, 80, 160, 240 и звонок с него
+    assert.deepEqual(rep.contest.map((x) => x.chat_id).sort(), ['u2i-chat-0', 'u2i-chat-160', 'u2i-chat-240', 'u2i-chat-80'], 'звонок и чат одного покупателя');
+    assert.ok(rep.costPerPhone > 0);
+  });
+
   await step('несколько моделей отвечают параллельно', async () => {
     const models = ['gpt-4o-mini', 'openrouter:vendor/no-json', 'bad-model'];
     const r = await api('/api/chats/u2i-chat-1/replay', { maxTurns: 2, models });

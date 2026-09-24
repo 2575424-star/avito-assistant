@@ -425,6 +425,6 @@ function reviewBatch(opts = {}) {
 }
 
 module.exports = {
-  jobState, stopJob, importHistory, managerStats, recountLeads, exportJsonl, replayChat, replayBatch, replyPoints,
+  jobState, stopJob, startJob, importHistory, managerStats, recountLeads, exportJsonl, replayChat, replayBatch, replyPoints,
   reviewChat, reviewBatch, buildReport,
 };

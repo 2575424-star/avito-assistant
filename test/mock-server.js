@@ -114,6 +114,31 @@ const server = http.createServer(async (req, res) => {
   if (req.headers.authorization !== 'Bearer mock-token') return json(res, 401, { error: 'unauthorized' });
   if (p === '/core/v1/accounts/self') return json(res, 200, { id: UID, name: 'Платон Авто (мок)' });
 
+  // ---- CPA: фактические списания ----
+  if (p.startsWith('/cpa/')) {
+    if (!req.headers['x-source']) return json(res, 400, { error: { message: 'X-Source required' } });
+    if (p === '/cpa/v3/balanceInfo') return json(res, 200, { balance: 1234500 });
+    const b = JSON.parse(raw || '{}');
+    if (p === '/cpa/v2/chatsByTime') {
+      // платные: чаты с телефоном (каждый 5-й) и длинные чаты 1 и 2
+      const billed = CHATS.filter((c, i) => i % 5 === 0 || i === 1 || i === 2).map((c) => {
+        const i = Number(c.id.split('-').pop());
+        const phone = i % 5 === 0;
+        const m = phone ? c.messages[2] : c.messages[4];
+        return { buyer: { buyerId: 5000 + i, name: `Покупатель ${i}` },
+          chat: { actionId: 70000 + i, channelId: c.id, contactType: phone ? 'phone' : 'other', date: new Date(m.created * 1000).toISOString(),
+            message: m.content.text, messageId: m.id, pricePenny: 45000, status: 'active', targetChatType: phone ? 'Контакты' : 'Переключения' },
+          isArbitrageAvailable: true, item: { itemId: c.context.value.id, title: c.context.value.title } };
+      });
+      return json(res, 200, { chats: billed.slice(b.offset || 0, (b.offset || 0) + (b.limit || 100)) });
+    }
+    if (p === '/cpa/v2/callsByTime') {
+      const c0 = CHATS[0];
+      return json(res, 200, { calls: [{ id: 555, buyerPhone: '+79151234510', createTime: new Date((c0.created + 3600) * 1000).toISOString(),
+        startTime: new Date((c0.created + 3600) * 1000).toISOString(), duration: 95, price: 60000, statusId: 0, itemId: c0.context.value.id, isArbitrageAvailable: true }] });
+    }
+  }
+
   if (p === '/core/v1/items') {
     const per = Number(url.searchParams.get('per_page') || 25);
     const page = Number(url.searchParams.get('page') || 1);

@@ -148,6 +148,29 @@ CREATE TABLE IF NOT EXISTS reports (
   created INTEGER
 );
 
+-- фактические целевые действия Авито (списания): чаты и звонки
+CREATE TABLE IF NOT EXISTS cpa_actions (
+  id TEXT PRIMARY KEY,          -- 'chat:<actionId>' / 'call:<id>'
+  kind TEXT,                    -- chat / call
+  chat_id TEXT,                 -- channelId для чатов
+  message_id TEXT,              -- сообщение, на котором сработало целевое действие
+  message TEXT,
+  contact_type TEXT,            -- phone / email / nick / other
+  target_type TEXT,             -- Контакты / Сделка / Переключения
+  price INTEGER,                -- в копейках
+  status TEXT,
+  arbitrage INTEGER,            -- можно опротестовать
+  buyer_id INTEGER,
+  buyer_phone TEXT,             -- для звонков
+  item_id INTEGER,
+  item_title TEXT,
+  duration INTEGER,             -- для звонков, сек
+  created INTEGER,
+  raw TEXT,
+  synced_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_cpa_chat ON cpa_actions(chat_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER,

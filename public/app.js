@@ -696,7 +696,15 @@ async function renderArchive() {
       <input type="date" id="stFrom" style="width:auto"> — <input type="date" id="stTo" style="width:auto" value="${dateInput(new Date())}"></div>
       <div id="stBox" style="margin-top:14px">Загрузка…</div></div>
 
-    <div class="card"><h3>3. Разбор переписок нейросетью</h3>
+    <div class="card"><h3>3. Расходы Авито на целевые действия</h3>
+      <div class="muted small">Фактические списания из API Авито (раздел CPA), только чтение: какие чаты и звонки оплачены, сколько стоили, на каком сообщении сработала оплата и что можно опротестовать (срок — 7 дней). Правила оплаты — docs/avito-cpa-rules.md.</div>
+      <div class="row" style="margin-top:12px"><label style="flex-direction:row;align-items:center">За <input type="number" id="cpaDays" value="60" min="1" max="180" style="width:80px"> дней</label>
+        <button class="btn primary" id="cpaStart" ${st.avitoConfigured ? '' : 'disabled'}>⬇ Загрузить списания</button></div>
+      <div id="cpaJob"></div>
+      <div id="cpaBox" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card"><h3>4. Разбор переписок нейросетью</h3>
       <div class="muted small">Нейросеть читает диалоги как руководитель отдела продаж: что спрашивали клиенты, где продавец ошибся, как надо было ответить. Потом собирает сводный отчёт с правилами и ответами для базы знаний. Примерно 1–3 тыс. токенов на чат.</div>
       <div class="row" style="margin-top:12px">
         <label style="flex-direction:row;align-items:center">Чатов <input type="number" id="rvCount" value="30" min="1" max="200" style="width:90px"></label>
@@ -769,6 +777,34 @@ async function renderArchive() {
     toast(`Проверено чатов без телефона: ${r.checked}, найдено номеров: ${r.found}`);
     loadStats();
   });
+  const rub = (p) => (p == null ? '—' : Math.round(p / 100).toLocaleString('ru-RU') + ' ₽');
+  const loadCpa = async () => {
+    const d = await api('/api/cpa/report');
+    const box = $('#cpaBox');
+    if (!box) return;
+    if (!d.chats.n && !d.calls.n) { box.innerHTML = '<div class="muted">Списаний пока нет — нажмите «Загрузить списания».</div>'; return; }
+    box.innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><span>Платных чатов</span><b>${d.chats.n} · ${rub(d.chats.sum)}</b></div>
+        <div class="kpi"><span>Платных звонков</span><b>${d.calls.n} · ${rub(d.calls.sum)}</b></div>
+        <div class="kpi"><span>Оплачено без телефона (чаты в базе)</span><b style="color:${d.noPhoneCount ? 'var(--orange)' : 'inherit'}">${d.noPhoneCount} из ${d.inDb}</b></div>
+        <div class="kpi"><span>Цена одного телефона из чата</span><b>${rub(d.costPerPhone)}</b></div>
+      </div>
+      <div class="muted small" style="margin:8px 0">Оплата сработала на сообщении: клиента — ${d.triggerSide['клиент']}, продавца — ${d.triggerSide['продавец']}, не найдено в базе — ${d.triggerSide['не найдено']}. Тип целевого чата: ${d.chats.byTarget.map((x) => `${esc(x.key)} — ${x.n}`).join(', ')}. Наша оценка «платный» совпала с фактом в ${d.estimateAgreement ?? '—'}% чатов.${d.calls.n ? ` Звонки: ${d.calls.byStatus.map((x) => `${esc(x.key)} — ${x.n}`).join(', ')}; средняя длительность ${d.calls.avgDuration} с.` : ''}</div>
+      ${d.contest.length ? `<h4>Можно опротестовать: звонок и чат одного покупателя (п. 3.5)</h4>
+        <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Клиент</th><th>Чат</th><th>Звонок</th><th>Срок жалобы</th><th></th></tr></thead><tbody>
+        ${d.contest.map((x) => `<tr><td>${esc(x.client_name || '')}<div class="small muted">${esc(x.phone)}</div></td><td>${rub(x.chat_price)} · ${fmtTime(x.chat_at)}</td><td>${rub(x.call_price)} · ${fmtTime(x.call_at)}</td>
+          <td>${x.deadlinePassed ? '<span class="badge">прошёл</span>' : '<span class="badge green">идёт</span>'}</td><td><a href="#/chats/${encodeURIComponent(x.chat_id)}">чат →</a></td></tr>`).join('')}
+        </tbody></table></div><div class="muted small">Жалобу подаёт человек в Авито Pro после проверки. Автоматически сервис ничего не опротестовывает.</div>` : ''}
+      ${d.noPhone.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">Оплаченные чаты без телефона (${d.noPhoneCount})</summary>
+        <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Клиент</th><th>Тип</th><th>Сообщение-триггер</th><th>Цена</th><th></th></tr></thead><tbody>
+        ${d.noPhone.map((x) => `<tr><td>${esc(x.client_name || '')}<div class="small muted">${esc(x.item_title || '')}</div></td><td>${esc(x.target_type || '')}</td><td class="small">${esc((x.message || '').slice(0, 160))}</td><td>${rub(x.price)}</td><td><a href="#/chats/${encodeURIComponent(x.chat_id)}">чат →</a></td></tr>`).join('')}
+        </tbody></table></div></details>` : ''}`;
+  };
+  $('#cpaStart').addEventListener('click', async () => {
+    try { await api('/api/cpa/import', { body: { days: Number($('#cpaDays').value) } }); toast('Загрузка списаний запущена'); } catch (e) { toast(e.message, true); }
+  });
+  watchJob('cpa', $('#cpaJob'), 'Загружаю списания Авито…', loadCpa);
   $('#stFrom').addEventListener('change', loadStats);
   $('#stTo').addEventListener('change', loadStats);
   $('#impStart').addEventListener('click', async () => {
@@ -784,7 +820,7 @@ async function renderArchive() {
   });
   watchJob('import', $('#impJob'), 'Загружаю историю…', () => { loadStats(); loadStatus(); });
   watchJob('review', $('#rvJob'), 'Разбираю переписки…', loadReport);
-  await Promise.all([loadStats(), loadReport()]);
+  await Promise.all([loadStats(), loadReport(), loadCpa()]);
 }
 
 // ---------- база знаний ----------
