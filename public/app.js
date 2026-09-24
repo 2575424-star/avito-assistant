@@ -1171,6 +1171,9 @@ async function renderLab() {
         <div><b class="small">Стратегии</b> <a class="small" href="#/settings/strategies">редактор и версии →</a><div class="chips" style="margin-top:6px">${cfg.strategies.map((v) => `<label class="chip ${L.versions.has(v.id) ? 'active' : ''}"><input type="checkbox" data-lv="${v.id}" ${L.versions.has(v.id) ? 'checked' : ''} style="display:none">${esc(v.title || v.key)} ${esc(v.version)}</label>`).join('')}</div></div>
         <div><b class="small">Модели</b> <a class="small" href="#/settings/keys">ключи и цены →</a><div class="chips" style="margin-top:6px">${cfg.models.map((m) => `<label class="chip ${L.models.has(m.id) ? 'active' : ''}"><input type="checkbox" data-lm="${m.id}" ${L.models.has(m.id) ? 'checked' : ''} style="display:none">${esc(m.label)} ${m.profile_name ? '' : '⚠ нет ключа'}</label>`).join('')}</div></div>
       </div>
+      <label style="margin-top:14px">Автомобиль
+        <select id="labItem"><option value="">из сценария (Toyota RAV4, условия заданы в вопросе)</option>${cfg.items.map((it) => `<option value="${esc(it.key)}" ${L.item === it.key ? 'selected' : ''}>${esc(it.title)}${it.price ? ' · ' + Number(it.price).toLocaleString('ru-RU') + ' ₽' : ''}${it.availability ? ' · ' + ({ in_stock: 'в наличии', in_transit: 'в пути', on_order: 'под заказ' }[it.availability] || '') : ''}</option>`).join('')}</select>
+        <span class="field-help">Реальная машина из «Базы знаний»: модели увидят её карточку (название, цена, наличие, описание). Условия вопроса — кредит, трейд-ин, сроки — остаются из сценария.</span></label>
       <div style="margin-top:14px"><div class="row"><b class="small">Вопросы</b><span class="spacer"></span>
         <div class="chips">${Object.entries(sets).map(([k, l]) => `<button class="chip ${L.set === k ? 'active' : ''}" data-set="${k}">${l} ${cfg.cases.filter((c) => c.set_name === k).length}</button>`).join('')}</div></div>
         <div class="row small" style="margin:8px 0"><button class="link" id="labAll">выбрать все в наборе</button><button class="link" id="labNone">снять выбор</button><span class="muted">выбрано: <b id="labSelN">0</b></span></div>
@@ -1210,7 +1213,7 @@ async function renderLab() {
   const updEst = async () => {
     $('#labSelN').textContent = L.cases.size;
     if (!L.cases.size || !L.versions.size || !L.models.size) { $('#labEst').innerHTML = '<span class="muted">Выберите стратегии, модели и вопросы.</span>'; return; }
-    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value } });
+    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value, itemKey: L.item || null } });
     $('#labEst').innerHTML = `<b>${e.runs}</b> прогонов, <b>${e.requests}</b> запросов к моделям. Ожидаемый расход: <b>${usd(e.low)} – ${usd(e.high)}</b> (${e.perModel.map((m) => `${esc(m.label)}: ${m.priced ? usd(m.low) + '–' + usd(m.high) : 'цена не задана'}`).join('; ')}). Оценка по длине промптов, точный расход — по usage после прогона.
       ${e.missingKeys.length ? `<div style="color:var(--orange)">Нет ключа: ${e.missingKeys.map(esc).join(', ')} — <a href="#/settings/keys">добавить</a></div>` : ''}`;
   };
@@ -1222,6 +1225,7 @@ async function renderLab() {
   $('#labAll').addEventListener('click', () => { cfg.cases.filter((c) => c.set_name === L.set).forEach((c) => L.cases.add(c.id)); $$('[data-lc]').forEach((i) => { i.checked = true; }); updEst(); });
   $('#labNone').addEventListener('click', () => { L.cases.clear(); $$('[data-lc]').forEach((i) => { i.checked = false; }); updEst(); });
   $('#labRep').addEventListener('change', updEst);
+  $('#labItem').addEventListener('change', (e) => { L.item = e.target.value; updEst(); });
   $('#custAdd').addEventListener('click', async () => {
     try {
       const r = await api('/api/lab/case', { body: { text: $('#custText').value, facts: $('#custFacts').value.trim() || undefined } });
@@ -1230,10 +1234,10 @@ async function renderLab() {
   });
   $('#labRun').addEventListener('click', async () => {
     L.limit = Number($('#labLimit').value);
-    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value } });
+    const e = await api('/api/lab/estimate', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value, itemKey: L.item || null } });
     if (!confirm(`Запустить ${e.runs} прогонов (${e.requests} запросов)? Ожидаемый расход ${usd(e.low)}–${usd(e.high)}, лимит $${L.limit}. Прогон остановится при достижении лимита.`)) return;
     try {
-      await api('/api/lab/run', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value, concurrency: $('#labConc').value, limitUsd: L.limit } });
+      await api('/api/lab/run', { body: { caseIds: selIds(), versionIds: [...L.versions], modelIds: [...L.models], repeats: $('#labRep').value, concurrency: $('#labConc').value, limitUsd: L.limit, itemKey: L.item || null } });
       toast('Прогон запущен');
     } catch (err) { toast(err.message, true); }
   });
@@ -1256,7 +1260,7 @@ async function renderLab() {
     const sel = $('#labBatch');
     if (!sel) return;
     if (pickLatest || L.batch === undefined) L.batch = d.batches[0]?.batch || '';
-    sel.innerHTML = `<option value="">все прогоны</option>` + d.batches.map((b) => `<option value="${esc(b.batch)}" ${L.batch === b.batch ? 'selected' : ''}>${fmtTime(b.created)} · ${b.cases} вопр. · ${b.runs} отв.${b.errors ? ' · ошибок ' + b.errors : ''} · ${usd(b.cost)}</option>`).join('');
+    sel.innerHTML = `<option value="">все прогоны</option>` + d.batches.map((b) => `<option value="${esc(b.batch)}" ${L.batch === b.batch ? 'selected' : ''}>${fmtTime(b.created)} · ${b.cases} вопр. · ${b.runs} отв.${b.errors ? ' · ошибок ' + b.errors : ''} · ${usd(b.cost)}${b.item_title ? ' · ' + esc(b.item_title) : ''}</option>`).join('');
     $('#labCsv').href = '/api/lab/export.csv' + (L.batch ? '?batch=' + encodeURIComponent(L.batch) : '');
   };
 
@@ -1300,7 +1304,7 @@ async function renderLab() {
       else cards.sort((a, b) => so(a) - so(b) || a.version_id - b.version_id || a.lab_model_id - b.lab_model_id);
       const cols = L.blind ? 3 : Math.max(1, new Set(cards.map((r) => r.lab_model_id)).size);
       return `<div style="border-top:1px solid var(--border);padding:14px 0">
-        <div><b>${esc(cid)} — ${esc(kase?.title || '')}</b></div>
+        <div><b>${esc(cid)} — ${esc(kase?.title || '')}</b>${cards[0]?.item_title ? ` <span class="badge blue">${esc(cards[0].item_title)}</span>` : ''}</div>
         <div class="client-says" style="margin:8px 0"><span class="small muted">Клиент</span><br>${esc((kase?.client_turns || []).join('\n'))}</div>
         <div class="small muted" style="margin-bottom:8px"><b>Учебные факты:</b> ${esc(JSON.stringify(kase?.facts || {}))}<br><b>Ожидается:</b> ${esc((kase?.expected || []).join('; ') || '—')}</div>
         <div class="compare" style="grid-template-columns:repeat(${cols}, minmax(0,1fr))">${cards.map((r, i) => card(r, i, L.blind)).join('')}</div>

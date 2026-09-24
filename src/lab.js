@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { db, getSetting, setSetting, logEvent } = require('./db');
 const llm = require('./llm');
 const chatstate = require('./chatstate');
+const { itemCard } = require('./knowledge'); // только форматирование карточки, без обращений к Авито
 
 const now = () => Math.floor(Date.now() / 1000);
 const LAB_DIR = path.join(__dirname, 'lab');
@@ -69,8 +70,9 @@ function cases() {
 }
 
 // ---------- Сборка промпта: общий слой + стратегия + факты + адаптер формата ----------
-const ADAPTER = `АДАПТЕР ПРИЛОЖЕНИЯ (тестовый режим):
-- Ты в тестовом прогоне на учебных фактах. Реальных инструментов записи, брони, CRM и отправки материалов нет: не пиши, что действие выполнено.
+const ADAPTER = `АДАПТЕР ПРИЛОЖЕНИЯ:
+- Инструментов записи, брони, CRM и отправки материалов у тебя нет: не пиши, что действие выполнено.
+- Названия, адреса и цены бери из фактов как есть, без слов «учебный», «тестовый», «пример».
 - Клиент видит только текст из поля "reply". Служебные поля обрабатывает программа.
 - Верни строго JSON-объект:
 {"reply": "текст сообщения клиенту (до 800 символов, без markdown)",
@@ -78,11 +80,24 @@ const ADAPTER = `АДАПТЕР ПРИЛОЖЕНИЯ (тестовый режи�
  "handoff": true/false — нужен живой сотрудник (жалоба, спор, вопрос вне полномочий, просьба позвать человека),
  "skip": true/false — отвечать не нужно (клиент попрощался или просит больше не писать и вопроса нет)}`;
 
-function buildPrompt(version, kase, history) {
+// поля сценария, которые заменяет карточка реального автомобиля
+const CAR_KEYS = ['model', 'listing_price_rub', 'cash_total_rub', 'our_cash_total_rub', 'price_cash_rub', 'trim', 'features', 'engine', 'transmission', 'drive', 'mileage_km', 'vin'];
+
+function getItem(key) {
+  return key ? db.prepare('SELECT * FROM items WHERE key = ?').get(String(key)) || null : null;
+}
+
+function buildPrompt(version, kase, history, item = null) {
   const facts = { 'company.display_name': 'InDrive', ...kase.facts };
+  if (item) {
+    for (const k of CAR_KEYS) delete facts[k];
+    // у реальной машины наличие своё — оно важнее условия сценария
+    if (item.availability_manual || item.availability) { delete facts.availability; delete facts.eta; delete facts.eta_confirmed; }
+  }
   const parts = [version.base_prompt];
   if (version.strategy) parts.push(version.strategy);
-  parts.push('ФАКТЫ (учебные условия теста; считать подтверждёнными на сегодня; null или отсутствие поля — данных нет):\n' + JSON.stringify(facts, null, 1));
+  if (item) parts.push('АВТОМОБИЛЬ ИЗ ОБЪЯВЛЕНИЯ (подтверждённые данные):\n' + itemCard(item) + '\n\nФакты ниже (кредит, трейд-ин, сроки, полномочия компании) дополняют карточку.');
+  parts.push('ФАКТЫ (считать подтверждёнными на сегодня; null или отсутствие поля — данных нет):\n' + JSON.stringify(facts, null, 1));
   parts.push(chatstate.cpaPromptLine(chatstate.cpaState(history)));
   parts.push(ADAPTER);
   return parts.join('\n\n');
@@ -145,7 +160,7 @@ function checkTurn({ reply, parsed, turnIndex, clientTurns, facts, history }) {
 }
 
 // ---------- Прогон одной комбинации на одном сценарии ----------
-async function runOne({ kase, version, model, batch, isStopped }) {
+async function runOne({ kase, version, model, batch, isStopped, item = null }) {
   const profile = profileWithSecret(model.key_profile_id);
   const turnsOut = [];
   const history = []; // только свои ответы этой комбинации
@@ -157,7 +172,7 @@ async function runOne({ kase, version, model, batch, isStopped }) {
   for (const g of groups) {
     if (isStopped()) { status = 'stopped'; break; }
     for (const text of g) history.push({ id: 'c' + history.length, direction: 'in', source: 'client', type: 'text', text, created: now() });
-    const system = buildPrompt(version, kase, history);
+    const system = buildPrompt(version, kase, history, item);
     promptHash ||= crypto.createHash('sha256').update(system).digest('hex').slice(0, 16);
     db.prepare('INSERT OR IGNORE INTO prompt_snapshots(hash, text, created) VALUES(?,?,?)').run(
       crypto.createHash('sha256').update(system).digest('hex').slice(0, 16), system, now());
@@ -183,18 +198,20 @@ async function runOne({ kase, version, model, batch, isStopped }) {
   }
   const flags = turnsOut.flatMap((t, i) => (t.flags || []).map((f) => ({ ...f, turn: i + 1 })));
   const r = db.prepare(`INSERT INTO lab_runs(batch, case_id, case_version, version_id, lab_model_id, model, api, params, key_profile, prompt_hash, turns, status, error,
-      input_tokens, cached_tokens, output_tokens, reasoning_tokens, usage_known, cost_usd, price_version, ms, flags, created)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      input_tokens, cached_tokens, output_tokens, reasoning_tokens, usage_known, cost_usd, price_version, ms, flags, created, item_key)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     batch, kase.id, kase.version, version.id, model.id, model.model, api, JSON.stringify(params), profile?.name || null, promptHash,
     JSON.stringify(turnsOut), status, error,
     totals.known ? totals.input : null, totals.known ? totals.cached : null, totals.known ? totals.output : null, totals.known ? totals.reasoning : null,
     totals.known && turnsOut.length ? 1 : 0, costKnown && turnsOut.some((t) => t.usage) ? cost : null, model.price_version, ms, JSON.stringify(flags), now(),
+    item?.key || null,
   );
   return { id: Number(r.lastInsertRowid), status, cost: costKnown ? cost : null };
 }
 
 // ---------- Оценка расхода до запуска ----------
-function estimate({ caseIds, versionIds, modelIds, repeats = 1 }) {
+function estimate({ caseIds, versionIds, modelIds, repeats = 1, itemKey = null }) {
+  const item = getItem(itemKey);
   const cs = cases().filter((c) => caseIds.includes(c.id));
   const vs = versionIds.map((id) => db.prepare('SELECT * FROM agent_versions WHERE id = ?').get(Number(id))).filter(Boolean);
   const ms = models().filter((m) => modelIds.includes(m.id));
@@ -205,7 +222,7 @@ function estimate({ caseIds, versionIds, modelIds, repeats = 1 }) {
     const calls = c.turn_mode === 'consecutive_messages_one_response' ? 1 : c.client_turns.length;
     for (const v of vs) {
       // ~3 символа на токен для русского текста; история растёт с каждым ходом
-      const promptTokens = Math.round(buildPrompt(v, c, []).length / 3);
+      const promptTokens = Math.round(buildPrompt(v, c, [], item).length / 3);
       for (const m of ms) {
         for (let t = 0; t < calls; t++) {
           const input = promptTokens + t * 250;
@@ -224,8 +241,10 @@ function estimate({ caseIds, versionIds, modelIds, repeats = 1 }) {
 }
 
 // ---------- Пакетный прогон ----------
-function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, limitUsd }, startJob) {
-  const est = estimate({ caseIds, versionIds, modelIds, repeats });
+function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, limitUsd, itemKey = null }, startJob) {
+  const est = estimate({ caseIds, versionIds, modelIds, repeats, itemKey });
+  const item = getItem(itemKey);
+  if (itemKey && !item) throw new Error('Автомобиль не найден в базе знаний');
   if (!est.runs) throw new Error('Выберите хотя бы один сценарий, стратегию и модель');
   if (est.missingKeys.length) throw new Error('Нет ключа у модели: ' + est.missingKeys.join(', ') + '. Настройки → Ключи и модели');
   const limit = Number(limitUsd);
@@ -247,7 +266,7 @@ function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, li
     const worker = async () => {
       while (!job.stop && next < tasks.length) {
         const t = tasks[next++];
-        const r = await runOne({ ...t, batch, isStopped });
+        const r = await runOne({ ...t, batch, isStopped, item });
         if (r.status === 'error') job.errors++;
         // неизвестный расход учитываем по верхней оценке, чтобы лимит не пробить
         job.cost += r.cost ?? (est.high / Math.max(1, est.runs));
@@ -270,8 +289,8 @@ function runs({ caseId, batch, limit = 500 } = {}) {
   const args = [];
   if (caseId) { where.push('r.case_id = ?'); args.push(caseId); }
   if (batch) { where.push('r.batch = ?'); args.push(batch); }
-  return db.prepare(`SELECT r.*, v.key AS v_key, v.version AS v_version, m.label AS model_label FROM lab_runs r
-      LEFT JOIN agent_versions v ON v.id = r.version_id LEFT JOIN lab_models m ON m.id = r.lab_model_id
+  return db.prepare(`SELECT r.*, v.key AS v_key, v.version AS v_version, m.label AS model_label, i.title AS item_title FROM lab_runs r
+      LEFT JOIN agent_versions v ON v.id = r.version_id LEFT JOIN lab_models m ON m.id = r.lab_model_id LEFT JOIN items i ON i.key = r.item_key
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r.id DESC LIMIT ?`).all(...args, limit)
     .map((r) => ({ ...r, turns: JSON.parse(r.turns || '[]'), flags: JSON.parse(r.flags || '[]'), scores: r.scores ? JSON.parse(r.scores) : null, params: r.params ? JSON.parse(r.params) : null }));
 }
@@ -321,8 +340,8 @@ function summary({ batch, set } = {}) {
 
 /** Прогоны (пакеты) — последние сверху. */
 function batches() {
-  return db.prepare(`SELECT batch, MIN(created) created, COUNT(*) runs, COUNT(DISTINCT case_id) cases, SUM(status = 'error') errors, SUM(cost_usd) cost
-    FROM lab_runs GROUP BY batch ORDER BY created DESC LIMIT 100`).all();
+  return db.prepare(`SELECT r.batch, MIN(r.created) created, COUNT(*) runs, COUNT(DISTINCT r.case_id) cases, SUM(r.status = 'error') errors, SUM(r.cost_usd) cost, MAX(i.title) item_title
+    FROM lab_runs r LEFT JOIN items i ON i.key = r.item_key GROUP BY r.batch ORDER BY created DESC LIMIT 100`).all();
 }
 
 /** Ответы таблицей для Excel: одна строка — один ход одной комбинации. */

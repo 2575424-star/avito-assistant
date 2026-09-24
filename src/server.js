@@ -454,17 +454,19 @@ async function api(req, res, url) {
 
   // ----- Лаборатория: стратегии × модели на тестовых сценариях (изолировано от чатов и Авито) -----
   if (p === '/api/lab/config') {
-    return send(res, 200, { strategies: lab.strategies(), models: lab.models(), profiles: lab.profiles(), cases: lab.cases(), criteria: lab.CRITERIA });
+    const items = db.prepare(`SELECT key, title, price, COALESCE(availability_manual, availability) availability FROM items
+      WHERE avito_id IS NOT NULL AND (status = 'active' OR status IS NULL) ORDER BY title LIMIT 400`).all();
+    return send(res, 200, { strategies: lab.strategies(), models: lab.models(), profiles: lab.profiles(), cases: lab.cases(), criteria: lab.CRITERIA, items });
   }
   if (p === '/api/lab/estimate' && m === 'POST') {
     const b = await readBody(req);
-    return send(res, 200, lab.estimate({ caseIds: b.caseIds || [], versionIds: b.versionIds || [], modelIds: (b.modelIds || []).map(Number), repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)) }));
+    return send(res, 200, lab.estimate({ caseIds: b.caseIds || [], versionIds: b.versionIds || [], modelIds: (b.modelIds || []).map(Number), repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)), itemKey: b.itemKey || null }));
   }
   if (p === '/api/lab/run' && m === 'POST') {
     const b = await readBody(req);
     try {
       const job = lab.start({ caseIds: b.caseIds || [], versionIds: b.versionIds || [], modelIds: (b.modelIds || []).map(Number),
-        repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)), concurrency: b.concurrency, limitUsd: b.limitUsd }, history.startJob);
+        repeats: Math.max(1, Math.min(5, Number(b.repeats) || 1)), concurrency: b.concurrency, limitUsd: b.limitUsd, itemKey: b.itemKey || null }, history.startJob);
       return send(res, 200, job);
     } catch (e) { return send(res, 400, { error: e.message }); }
   }
