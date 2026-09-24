@@ -1194,14 +1194,17 @@ async function renderLab() {
       <div class="small" id="labEst" style="margin-top:10px"></div>
       <div id="labJob"></div>
     </div>
-    <div class="card"><div class="row"><h3 style="margin:0">3. Сводка по комбинациям</h3><span class="spacer"></span>
+    <div class="card"><div class="row"><h3 style="margin:0">3. Ответы моделей</h3><span class="spacer"></span>
+      <select id="labBatch" style="width:auto;max-width:320px"></select>
+      <select id="labCase" style="width:auto;max-width:320px"><option value="">все вопросы прогона</option>${cfg.cases.map((c) => `<option value="${esc(c.id)}" ${L.view === c.id ? 'selected' : ''}>${esc(c.id)} — ${esc(c.title)}</option>`).join('')}</select>
+      <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="labBlind" ${L.blind ? 'checked' : ''}> слепая оценка</label>
+      <a class="btn sm" id="labCsv" href="/api/lab/export.csv">⬇ Ответы в Excel (CSV)</a></div>
+      <div class="muted small" style="margin-top:6px">Все ответы сохраняются. Выберите прогон — ниже его вопросы, по каждому 6 карточек: строки — стратегии, столбцы — модели. «Все прогоны» + вопрос — последний ответ каждой комбинации по этому вопросу за всё время.</div>
+      <div id="labGrid" style="margin-top:12px"></div></div>
+    <div class="card"><div class="row"><h3 style="margin:0">4. Сводка по комбинациям</h3><span class="spacer"></span>
       <select id="sumSet" style="width:auto"><option value="">все вопросы</option>${Object.entries(sets).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
       <a class="btn sm" href="/api/lab/export.json">⬇ Экспорт JSON</a></div>
-      <div id="labSum" style="margin-top:12px"></div></div>
-    <div class="card"><div class="row"><h3 style="margin:0">4. Ответы по вопросу</h3><span class="spacer"></span>
-      <select id="labCase" style="width:auto;max-width:360px">${cfg.cases.map((c) => `<option value="${esc(c.id)}" ${L.view === c.id ? 'selected' : ''}>${esc(c.id)} — ${esc(c.title)}</option>`).join('')}</select>
-      <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" id="labBlind" ${L.blind ? 'checked' : ''}> слепая оценка</label></div>
-      <div id="labGrid" style="margin-top:12px"></div></div>`;
+      <div id="labSum" style="margin-top:12px"></div></div>`;
 
   const selIds = () => [...L.cases];
   const updEst = async () => {
@@ -1236,7 +1239,7 @@ async function renderLab() {
   });
 
   const loadSum = async () => {
-    const d = await api('/api/lab/summary?set=' + $('#sumSet').value);
+    const d = await api('/api/lab/summary?set=' + $('#sumSet').value + (L.batch ? '&batch=' + encodeURIComponent(L.batch) : ''));
     const box = $('#labSum');
     if (!box) return;
     box.innerHTML = d.summary.length ? `<div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Стратегия</th><th>Модель</th><th>Прогонов</th><th>Ошибок</th><th>Оценено</th>${Object.values(LAB_CRIT).map((l) => `<th>${l}</th>`).join('')}<th>Итог</th><th>Критич. (авто / человек)</th><th>Время (медиана)</th><th>Токены вход / кэш / выход / reasoning</th><th>Стоимость всего / за прогон</th></tr></thead><tbody>
@@ -1248,51 +1251,72 @@ async function renderLab() {
   };
   $('#sumSet').addEventListener('change', loadSum);
 
+  const loadBatches = async (pickLatest) => {
+    const d = await api('/api/lab/batches');
+    const sel = $('#labBatch');
+    if (!sel) return;
+    if (pickLatest || L.batch === undefined) L.batch = d.batches[0]?.batch || '';
+    sel.innerHTML = `<option value="">все прогоны</option>` + d.batches.map((b) => `<option value="${esc(b.batch)}" ${L.batch === b.batch ? 'selected' : ''}>${fmtTime(b.created)} · ${b.cases} вопр. · ${b.runs} отв.${b.errors ? ' · ошибок ' + b.errors : ''} · ${usd(b.cost)}</option>`).join('');
+    $('#labCsv').href = '/api/lab/export.csv' + (L.batch ? '?batch=' + encodeURIComponent(L.batch) : '');
+  };
+
+  const card = (r, i, blind) => {
+    const hide = blind && !r.rated_at;
+    const label = hide ? `Вариант ${i + 1}` : `${esc(r.v_key)} ${esc(r.v_version)} · ${esc(r.model_label || r.model)}`;
+    return `<div class="draft ${r.status === 'error' ? 'bad' : r.rated_at ? 'good' : ''}" data-lr="${r.id}" style="max-width:none">
+      <div class="draft-head"><b>${label}</b>${hide ? '' : ` · ${r.ms ? (r.ms / 1000).toFixed(1) + ' с' : ''} · ${usd(r.cost_usd)}${r.usage_known ? ` · ${r.input_tokens}/${r.cached_tokens}/${r.output_tokens}/${r.reasoning_tokens} ток.` : ' · usage неизвестен'}`}</div>
+      ${r.status === 'error' ? `<div style="color:var(--red)">Ошибка: ${esc(r.error)}</div>` : ''}
+      ${r.turns.map((t) => `${r.turns.length > 1 ? `<div class="client-says small" style="margin:6px 0">${esc(t.client)}</div>` : ''}<div class="draft-text">${esc(t.reply ?? '')}${t.parsed?.skip ? ' <span class="badge">промолчал</span>' : ''}${t.parsed?.handoff ? ' <span class="badge orange">менеджеру</span>' : ''}</div>`).join('')}
+      ${r.flags.length ? `<div style="margin-top:6px">${r.flags.map((f) => `<span class="badge ${f.critical ? 'red' : 'orange'}" title="ход ${f.turn}">${esc(f.text)}</span>`).join(' ')}</div>` : ''}
+      ${r.status === 'error' ? '' : `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">${r.rated_at ? 'Оценено — изменить' : 'Оценить'}</summary><div class="form" style="margin-top:6px;gap:6px">
+        <div class="row small" style="gap:6px">${Object.entries(LAB_CRIT).map(([c, l]) => `<label style="flex-direction:row;align-items:center;gap:4px">${l}<select data-sc="${c}" style="width:auto;padding:4px">${['', 1, 2, 3, 4, 5].map((v) => `<option ${String(r.scores?.[c] ?? '') === String(v) ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`).join('')}</div>
+        <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" data-crit ${r.critical ? 'checked' : ''}> критическая ошибка</label>
+        <input type="text" data-comment placeholder="Комментарий" value="${esc(r.comment || '')}">
+        <textarea data-corr rows="2" placeholder="Как надо было ответить (необязательно)">${esc(r.correction || '')}</textarea>
+        <div><button class="btn sm primary" data-rate>Сохранить оценку</button></div></div></details>`}
+    </div>`;
+  };
+
   const loadGrid = async () => {
-    const id = $('#labCase').value; L.view = id;
-    const kase = cfg.cases.find((c) => c.id === id);
-    const d = await api('/api/lab/runs?case=' + encodeURIComponent(id));
+    L.view = $('#labCase').value;
     const box = $('#labGrid');
     if (!box) return;
-    // последний прогон каждой комбинации «версия × модель»
-    const latest = {}; const older = {};
-    for (const r of d.runs) { const k = r.version_id + '|' + r.lab_model_id; if (!latest[k]) latest[k] = r; else older[k] = (older[k] || 0) + 1; }
-    let cards = Object.values(latest);
-    const blind = L.blind;
-    if (blind) { const seed = [...id].reduce((a, c) => a + c.charCodeAt(0), 0); cards = cards.map((r, i) => ({ r, o: Math.sin(seed + r.id) })).sort((a, b) => a.o - b.o).map((x) => x.r); }
-    else {
-      // строки — стратегии в порядке списка, столбцы — модели (Sol, Luna)
-      const so = (r) => { const i = cfg.strategies.findIndex((v) => v.id === r.version_id); return i < 0 ? 99 : i; };
-      cards.sort((a, b) => so(a) - so(b) || a.version_id - b.version_id || a.lab_model_id - b.lab_model_id);
-    }
-    const head = `<div class="small muted" style="margin-bottom:8px"><b>Учебные факты:</b> ${esc(JSON.stringify(kase?.facts || {}))}<br><b>Ожидается:</b> ${esc((kase?.expected || []).join('; ') || '—')}</div>`;
-    box.innerHTML = head + (cards.length ? `<div class="compare" style="grid-template-columns:repeat(${blind ? 3 : Math.min(2, cards.length)}, minmax(0,1fr))">${cards.map((r, i) => {
-      const hide = blind && !r.rated_at;
-      const label = hide ? `Вариант ${i + 1}` : `${esc(r.v_key)} ${esc(r.v_version)} · ${esc(r.model_label || r.model)}`;
+    const qs = L.batch ? 'batch=' + encodeURIComponent(L.batch) + (L.view ? '&case=' + encodeURIComponent(L.view) : '') : (L.view ? 'case=' + encodeURIComponent(L.view) : '');
+    if (!qs) { box.innerHTML = '<div class="muted">Прогонов пока нет. Выберите вопросы и нажмите «Запустить».</div>'; return; }
+    const d = await api('/api/lab/runs?limit=2000&' + qs);
+    // по каждому вопросу — последний ответ каждой комбинации «версия × модель»
+    const byCase = {};
+    for (const r of d.runs) {
+      const c = (byCase[r.case_id] ||= {});
       const k = r.version_id + '|' + r.lab_model_id;
-      return `<div class="draft ${r.status === 'error' ? 'bad' : r.rated_at ? 'good' : ''}" data-lr="${r.id}" style="max-width:none">
-        <div class="draft-head"><b>${label}</b>${hide ? '' : ` · ${r.api} · ${r.ms ? (r.ms / 1000).toFixed(1) + ' с' : ''} · ${usd(r.cost_usd)}${r.usage_known ? ` · ${r.input_tokens}/${r.cached_tokens}/${r.output_tokens}/${r.reasoning_tokens} ток.` : ' · usage неизвестен'}`}${older[k] && !hide ? ` · ещё прогонов: ${older[k]}` : ''}</div>
-        ${r.status === 'error' ? `<div style="color:var(--red)">Ошибка: ${esc(r.error)}</div>` : ''}
-        ${r.turns.map((t) => `<div class="client-says small" style="margin:6px 0">${esc(t.client)}</div><div class="draft-text">${esc(t.reply ?? '')}${t.parsed?.skip ? ' <span class="badge">промолчал</span>' : ''}${t.parsed?.handoff ? ' <span class="badge orange">менеджеру</span>' : ''}</div>`).join('')}
-        ${r.flags.length ? `<div style="margin-top:6px">${r.flags.map((f) => `<span class="badge ${f.critical ? 'red' : 'orange'}" title="ход ${f.turn}">${esc(f.text)}</span>`).join(' ')}</div>` : ''}
-        ${r.status === 'error' ? '' : `<div class="form" style="margin-top:8px;gap:6px">
-          <div class="row small" style="gap:6px">${Object.entries(LAB_CRIT).map(([c, l]) => `<label style="flex-direction:row;align-items:center;gap:4px">${l}<select data-sc="${c}" style="width:auto;padding:4px">${['', 1, 2, 3, 4, 5].map((v) => `<option ${String(r.scores?.[c] ?? '') === String(v) ? 'selected' : ''}>${v}</option>`).join('')}</select></label>`).join('')}</div>
-          <label class="small" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" data-crit ${r.critical ? 'checked' : ''}> критическая ошибка</label>
-          <input type="text" data-comment placeholder="Комментарий" value="${esc(r.comment || '')}">
-          <textarea data-corr rows="2" placeholder="Как надо было ответить (необязательно)">${esc(r.correction || '')}</textarea>
-          <div><button class="btn sm primary" data-rate>Сохранить оценку</button></div></div>`}
+      if (!c[k]) c[k] = r;
+    }
+    const so = (r) => { const i = cfg.strategies.findIndex((v) => v.id === r.version_id); return i < 0 ? 99 : i; };
+    const caseIds = Object.keys(byCase).sort();
+    box.innerHTML = caseIds.map((cid) => {
+      const kase = cfg.cases.find((c) => c.id === cid);
+      let cards = Object.values(byCase[cid]);
+      if (L.blind) { const seed = [...cid].reduce((a, c) => a + c.charCodeAt(0), 0); cards = cards.map((r) => ({ r, o: Math.sin(seed + r.id) })).sort((a, b) => a.o - b.o).map((x) => x.r); }
+      else cards.sort((a, b) => so(a) - so(b) || a.version_id - b.version_id || a.lab_model_id - b.lab_model_id);
+      const cols = L.blind ? 3 : Math.max(1, new Set(cards.map((r) => r.lab_model_id)).size);
+      return `<div style="border-top:1px solid var(--border);padding:14px 0">
+        <div><b>${esc(cid)} — ${esc(kase?.title || '')}</b></div>
+        <div class="client-says" style="margin:8px 0"><span class="small muted">Клиент</span><br>${esc((kase?.client_turns || []).join('\n'))}</div>
+        <div class="small muted" style="margin-bottom:8px"><b>Учебные факты:</b> ${esc(JSON.stringify(kase?.facts || {}))}<br><b>Ожидается:</b> ${esc((kase?.expected || []).join('; ') || '—')}</div>
+        <div class="compare" style="grid-template-columns:repeat(${cols}, minmax(0,1fr))">${cards.map((r, i) => card(r, i, L.blind)).join('')}</div>
       </div>`;
-    }).join('')}</div>` : '<div class="muted">По этому вопросу прогонов ещё нет.</div>');
+    }).join('') || '<div class="muted">По этому выбору ответов нет.</div>';
     $$('[data-lr]', box).forEach((el) => $('[data-rate]', el)?.addEventListener('click', async () => {
-      const scores = {}; $$('[data-sc]', el).forEach((s) => { if (s.value) scores[s.dataset.sc] = Number(s.value); });
+      const scores = {}; $$('[data-sc]', el).forEach((x) => { if (x.value) scores[x.dataset.sc] = Number(x.value); });
       await api(`/api/lab/runs/${el.dataset.lr}/rate`, { body: { scores, critical: $('[data-crit]', el).checked, comment: $('[data-comment]', el).value, correction: $('[data-corr]', el).value } });
       toast('Оценка сохранена'); loadGrid(); loadSum();
     }));
   };
+  $('#labBatch').addEventListener('change', (e) => { L.batch = e.target.value; $('#labCsv').href = '/api/lab/export.csv' + (L.batch ? '?batch=' + encodeURIComponent(L.batch) : ''); loadGrid(); loadSum(); });
   $('#labCase').addEventListener('change', loadGrid);
   $('#labBlind').addEventListener('change', (e) => { L.blind = e.target.checked; loadGrid(); });
-  watchJob('lab', $('#labJob'), 'Модели отвечают…', () => { loadSum(); loadGrid(); });
-  updEst(); loadSum(); loadGrid();
+  watchJob('lab', $('#labJob'), 'Модели отвечают…', async () => { await loadBatches(true); loadSum(); loadGrid(); });
+  updEst(); loadSum(); await loadBatches(); loadGrid();
 }
 
 // ---------- boot ----------

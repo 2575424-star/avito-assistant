@@ -306,6 +306,12 @@ async function step(name, fn) {
     const row = sum.find((x) => x.lab_model_id === sol.id && x.version_id === solRun.version_id);
     assert.equal(row.rated, 1);
     assert.equal(row.overall, 4.2);
+    // все ответы сохраняются: список прогонов и выгрузка ответов для Excel
+    const bl = (await api('/api/lab/batches')).data.batches;
+    assert.equal(bl[0].runs, 18);
+    const csv = await (await fetch(base + '/api/lab/export.csv?batch=' + bl[0].batch)).text();
+    assert.equal((csv.match(/^"lab\d+"/gm) || []).length, 6 * (1 + 3 + 1), 'строка на каждый ход каждой комбинации');
+    assert.ok(csv.includes('Ответ gpt-6-luna'), 'в выгрузке тексты ответов');
     // экспорт без ключей
     const exp = await (await fetch(base + '/api/lab/export.json')).text();
     assert.ok(!exp.includes('sk-sol-test') && !exp.includes('sk-luna-test'));
