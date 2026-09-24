@@ -11,6 +11,7 @@ const knowledge = require('./knowledge');
 const history = require('./history');
 const billing = require('./billing');
 const lab = require('./lab');
+const llm = require('./llm');
 const gptLab = require('./gpt-lab');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -56,6 +57,14 @@ function readBody(req) {
     let raw = '';
     req.on('data', (c) => { raw += c; if (raw.length > 2e6) req.destroy(); });
     req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } });
+  });
+}
+function readRaw(req, limit = 15e6) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('Запись слишком длинная')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
   });
 }
 function cookies(req) {
@@ -508,6 +517,25 @@ async function api(req, res, url) {
     return send(res, 200, { summary: lab.summary({ batch: q.get('batch') || undefined, set: q.get('set') || undefined }) });
   }
   if (p === '/api/lab/batches') return send(res, 200, { batches: lab.batches() });
+  // ----- пояснения владельца к вопросам и голосовой ввод -----
+  if (p === '/api/lab/notes' && m === 'GET') return send(res, 200, { notes: lab.notes({ set: q.get('set') || 'archive' }) });
+  if (p === '/api/lab/notes' && m === 'POST') {
+    const b = await readBody(req);
+    try { lab.saveNote(b.case_id, b.note); } catch (e) { return send(res, 400, { error: e.message }); }
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/lab/notes.csv') {
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="voprosy-otvety-poyasneniya.csv"' });
+    return res.end(lab.notesCsv({ set: q.get('set') || 'archive' }));
+  }
+  if (p === '/api/transcribe' && m === 'POST') {
+    try {
+      const buf = await readRaw(req);
+      if (!buf.length) return send(res, 400, { error: 'Пустая запись' });
+      const text = await llm.transcribe({ profile: lab.transcribeProfile(), buf, mime: req.headers['content-type'] || 'audio/webm' });
+      return send(res, 200, { text });
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
   if (p === '/api/lab/export.csv') {
     res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="lab-answers.csv"' });
     return res.end(lab.exportCsv({ batch: q.get('batch') || undefined }));

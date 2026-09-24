@@ -1163,10 +1163,15 @@ const usd = (x) => (x == null ? '—' : '$' + (x < 0.01 ? x.toFixed(5) : x.toFix
 
 async function renderLab() {
   const cfg = await api('/api/lab/config');
-  state.lab ||= { set: 'faq', cases: new Set(), models: new Set(cfg.models.filter((m) => m.active).map((m) => m.id)), versions: new Set(cfg.strategies.map((s) => s.id)), view: null, blind: false };
+  state.lab ||= { set: 'archive', cases: new Set(), models: new Set(cfg.models.filter((m) => m.active).map((m) => m.id)), versions: new Set(cfg.strategies.map((s) => s.id)), view: null, blind: false };
   const L = state.lab;
-  const sets = { standard: 'Стандартные (GPT)', faq: 'Частые вопросы клиентов', custom: 'Свои вопросы' };
+  const sets = { archive: 'Вопросы из архива', standard: 'Стандартные (GPT)', faq: 'Частые вопросы клиентов', custom: 'Свои вопросы' };
   view().innerHTML = `
+    <div class="card"><div class="row"><h3 style="margin:0">Вопросы клиентов из архива: ответ агента и ваши пояснения</h3><span class="spacer"></span>
+      <button class="btn primary sm" id="arcGen">▶ Сгенерировать ответы агента</button>
+      <a class="btn sm" href="/api/lab/notes.csv">⬇ Скачать отчёт (Excel)</a></div>
+      <div class="muted small" style="margin-top:6px">36 вопросов, объединённых по смыслу из всех чатов архива. Ответ даёт стратегия «Простая» на GPT-4o mini${''} (машина — из поля «Автомобиль» ниже, если выбрана). В правой колонке напишите или надиктуйте 🎤 наши условия и особенности: кредитные программы, скидки, трейд-ин, график, что говорить. Сохраняется автоматически. Потом скачайте отчёт и пришлите его Claude — пояснения будут собраны в короткие факты салона для агента.</div>
+      <div id="arcNotes" style="margin-top:12px"></div></div>
     <div class="notice info" style="margin-bottom:16px">Лаборатория сравнивает стратегии общения на разных моделях на одних и тех же учебных вопросах. Изолирована от работы: не пишет в Авито, не трогает чаты, лиды и уведомления. Факты в сценариях учебные, не действующие цены.</div>
     <div class="card"><h3>1. Что сравниваем</h3>
       <div class="grid c2">
@@ -1321,8 +1326,86 @@ async function renderLab() {
   $('#labBatch').addEventListener('change', (e) => { L.batch = e.target.value; $('#labCsv').href = '/api/lab/export.csv' + (L.batch ? '?batch=' + encodeURIComponent(L.batch) : ''); loadGrid(); loadSum(); });
   $('#labCase').addEventListener('change', loadGrid);
   $('#labBlind').addEventListener('change', (e) => { L.blind = e.target.checked; loadGrid(); });
-  watchJob('lab', $('#labJob'), 'Модели отвечают…', async () => { await loadBatches(true); loadSum(); loadGrid(); });
+  // ----- вопросы из архива: ответ агента + пояснение владельца (текст или голос) -----
+  const loadNotes = async () => {
+    const box = $('#arcNotes');
+    if (!box) return;
+    const d = await api('/api/lab/notes?set=archive');
+    // не терять то, что набирается прямо сейчас (обновление приходит после прогона)
+    const typing = {};
+    $$('[data-note]', box).forEach((row) => { typing[row.dataset.note] = $('[data-ntext]', row).value; });
+    d.notes.forEach((n) => { if (typing[n.id] != null) n.note = typing[n.id]; });
+    box.innerHTML = d.notes.map((n, i) => `<div class="arc-row" data-note="${esc(n.id)}">
+      <div><b>${i + 1}. ${esc(n.title)}</b><div class="client-says small" style="margin-top:6px">${n.client_turns.map(esc).join('<br>')}</div></div>
+      <div class="small">${n.answer ? n.answer.turns.map((t) => (n.answer.turns.length > 1 ? `<div class="muted">Клиент: ${esc(t.client)}</div>` : '') + `<div class="draft-text" style="margin-bottom:6px">${esc(t.reply ?? '')}</div>`).join('') + `<div class="muted">${esc(n.answer.by)}</div>` : '<span class="muted">Ответа пока нет — нажмите «Сгенерировать ответы агента»</span>'}</div>
+      <div><textarea rows="4" data-ntext placeholder="Наши условия и особенности по этому вопросу…">${esc(n.note)}</textarea>
+        <div class="row small" style="margin-top:4px"><button class="btn sm" data-mic>🎤 Надиктовать</button><span class="muted" data-nstate>${n.note_updated ? 'сохранено' : ''}</span></div></div>
+    </div>`).join('');
+    $$('[data-note]', box).forEach((row) => {
+      const ta = $('[data-ntext]', row), st = $('[data-nstate]', row), mic = $('[data-mic]', row);
+      let timer;
+      const save = async () => {
+        clearTimeout(timer);
+        try { await api('/api/lab/notes', { body: { case_id: row.dataset.note, note: ta.value } }); st.textContent = 'сохранено'; } catch (e) { st.textContent = 'не сохранилось: ' + e.message; }
+      };
+      ta.addEventListener('input', () => { st.textContent = '…'; clearTimeout(timer); timer = setTimeout(save, 1200); });
+      ta.addEventListener('blur', () => { if (st.textContent === '…') save(); });
+      mic.addEventListener('click', () => voiceInput(mic, st, (text) => { ta.value = (ta.value.trim() ? ta.value.trim() + ' ' : '') + text; save(); }));
+    });
+  };
+  $('#arcGen').addEventListener('click', async () => {
+    const simple = cfg.strategies.find((v) => v.key === 'simple');
+    const mini = cfg.models.find((m) => m.model === 'gpt-4o-mini');
+    if (!simple || !mini) return toast('Нет стратегии «Простая» или модели GPT-4o mini', true);
+    const caseIds = cfg.cases.filter((c) => c.set_name === 'archive').map((c) => c.id);
+    const body = { caseIds, versionIds: [simple.id], modelIds: [mini.id], repeats: 1, itemKey: L.item || null };
+    const e = await api('/api/lab/estimate', { body });
+    if (e.missingKeys.length) return toast('Нет ключа у GPT-4o mini: Настройки → Ключи и модели', true);
+    if (!confirm(`Сгенерировать ответы на ${caseIds.length} вопросов (${e.requests} запросов к GPT-4o mini)? Ожидаемый расход ${usd(e.low)}–${usd(e.high)}, лимит $1.`)) return;
+    try { await api('/api/lab/run', { body: { ...body, concurrency: 4, limitUsd: 1 } }); } catch (err) { return toast(err.message, true); }
+    toast('Модель отвечает — ответы появятся здесь');
+    const btn = $('#arcGen'); btn.disabled = true; btn.textContent = 'Модель отвечает…';
+    const t = setInterval(async () => {
+      const j = (await api('/api/jobs').catch(() => ({}))).lab;
+      if (j?.running) { btn.textContent = `Модель отвечает… ${j.done || 0}/${j.total || caseIds.length}`; return; }
+      clearInterval(t);
+      if (!btn.isConnected) return;
+      btn.disabled = false; btn.textContent = '▶ Сгенерировать ответы агента';
+      loadNotes();
+      if (j?.errors) toast(`Ошибок: ${j.errors}. ${j.error || ''}`, true);
+    }, 2000);
+    state.timers.push(t);
+  });
+  loadNotes();
+  watchJob('lab', $('#labJob'), 'Модели отвечают…', async () => { await loadBatches(true); loadSum(); loadGrid(); loadNotes(); });
   updEst(); loadSum(); await loadBatches(); loadGrid();
+}
+
+// ---------- голосовой ввод: запись в браузере → распознавание на сервере (OpenAI) ----------
+let voiceRec = null;
+async function voiceInput(btn, status, onText) {
+  if (voiceRec) { voiceRec.stop(); return; } // повторное нажатие — остановить запись
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') return toast('Браузер не поддерживает запись голоса', true);
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { return toast('Нет доступа к микрофону — разрешите его в браузере', true); }
+  const rec = new MediaRecorder(stream);
+  const chunks = [];
+  voiceRec = rec;
+  const label = btn.textContent;
+  btn.textContent = '⏹ Остановить'; btn.classList.add('danger'); status.textContent = 'идёт запись…';
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = async () => {
+    voiceRec = null; stream.getTracks().forEach((t) => t.stop());
+    btn.textContent = label; btn.classList.remove('danger'); status.textContent = 'распознаю…';
+    const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+    try {
+      const r = await fetch('/api/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'ошибка');
+      if (d.text) onText(d.text); else status.textContent = 'ничего не распознано';
+    } catch (e) { status.textContent = 'не распознано: ' + e.message; }
+  };
+  rec.start();
 }
 
 // ---------- boot ----------

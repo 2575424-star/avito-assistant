@@ -364,6 +364,37 @@ async function step(name, fn) {
     assert.ok(cust.data.id.startsWith('CUS'));
   });
 
+  await step('вопросы из архива: ответ агента, пояснения, голос, отчёт', async () => {
+    const cfg = (await api('/api/lab/config')).data;
+    const arc = cfg.cases.filter((c) => c.set_name === 'archive');
+    assert.equal(arc.length, 36);
+    const simple = cfg.strategies.find((x) => x.key === 'simple');
+    const mini = cfg.models.find((x) => x.model === 'gpt-4o-mini');
+    const r = await api('/api/lab/run', { caseIds: arc.map((c) => c.id), versionIds: [simple.id], modelIds: [mini.id], limitUsd: 1, concurrency: 4 });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const job = await waitJob('lab');
+    assert.equal(job.errors, 0);
+    let notes = (await api('/api/lab/notes?set=archive')).data.notes;
+    assert.equal(notes.length, 36);
+    assert.ok(notes.every((n) => n.answer && n.answer.by.includes('simple')), 'у каждого вопроса есть ответ «Простой»');
+    assert.equal(notes.find((n) => n.id === 'ARC35').answer.turns.length, 2, 'ситуация «клиент прислал номер» — двухходовая');
+    assert.equal((await api('/api/lab/notes', { case_id: 'ARC07', note: 'Кредит: банки-партнёры, взнос от 0%' })).status, 200);
+    assert.equal((await api('/api/lab/notes', { case_id: 'NOPE', note: 'x' })).status, 400);
+    notes = (await api('/api/lab/notes?set=archive')).data.notes;
+    assert.equal(notes.find((n) => n.id === 'ARC07').note, 'Кредит: банки-партнёры, взнос от 0%');
+    const csv = await (await fetch(base + '/api/lab/notes.csv', )).text();
+    assert.ok(csv.includes('Кредит: банки-партнёры') && csv.includes('Условия кредита'), 'в отчёте вопрос и пояснение');
+    assert.equal((csv.match(/^"ARC\d\d"/gm) || []).length, 36);
+    // голос: запись уходит на распознавание ключом GPT-4o mini, текст возвращается
+    const tr = await fetch(base + '/api/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/webm;codecs=opus' }, body: Buffer.from('fake-audio') });
+    const td = await tr.json();
+    assert.equal(tr.status, 200, JSON.stringify(td));
+    assert.match(td.text, /Кредит от шести процентов/);
+    assert.equal((await counters()).keys.transcribe, 'Bearer sk-luna-test-5678');
+    const empty = await fetch(base + '/api/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/webm' }, body: Buffer.alloc(0) });
+    assert.equal(empty.status, 400);
+  });
+
   await step('песочница с автомобилем из базы', async () => {
     const r = await api('/api/sandbox', { history: [{ direction: 'in', text: 'Какой привод?' }], item: { id: 9002 } });
     assert.equal(r.status, 200, JSON.stringify(r.data));
