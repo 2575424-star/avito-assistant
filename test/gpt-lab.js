@@ -20,7 +20,7 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
   try {
     assert.equal(gpt.config().strategies.length,2);
     assert.equal(gpt.config().questions.length,16);
-    assert.equal(lab.strategies().length,3,'existing lab unchanged');
+    assert.equal(lab.strategies().length,4,'existing lab: three strategies + simple');
     assert.throws(()=>gpt.start({caseIds:['GPT01']}),/ключ/);
     for(const [i,m] of lab.models().entries()) {
       const id=Number(db.prepare('INSERT INTO key_profiles(name,provider,api_key,created) VALUES(?,?,?,?)').run('profile'+i,'openai','sk-fake-'+i,1).lastInsertRowid);
@@ -35,7 +35,7 @@ const sleep=()=>new Promise(r=>setTimeout(r,10));
     const result=gpt.results(job.batch);
     assert.equal(result.runs.length,8);
     assert.equal(calls.length,16,'4 one-turn plus 4 three-turn conversations');
-    assert.deepEqual(new Set(calls.map(p=>p.profile.api_key)),new Set(['sk-fake-0','sk-fake-1']));
+    assert.deepEqual(new Set(calls.map(p=>p.profile.api_key)),new Set(['sk-fake-1','sk-fake-2']),'Luna and GPT-4o mini, Sol not used');
     for(const r of result.runs.filter(r=>r.case_id==='GPT10'))assert.equal(r.turns.length,3);
     assert.doesNotMatch(JSON.stringify(gpt.config()),/sk-fake/);
     assert.doesNotMatch(JSON.stringify(result),/cost_usd|input_tokens|sk-fake/);

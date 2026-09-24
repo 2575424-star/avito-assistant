@@ -13,7 +13,7 @@ const LAB_DIR = path.join(__dirname, 'lab');
 const read = (f) => fs.readFileSync(path.join(LAB_DIR, f), 'utf8');
 
 // ---------- Начальные данные (v0.3.0 от владельца: 3 стратегии × 2 модели) ----------
-const LAB_KEYS = ['codex_business', 'codex_friendly', 'claude_independent'];
+const LAB_KEYS = ['codex_business', 'codex_friendly', 'claude_independent', 'simple'];
 
 function seed() {
   const common = read('common_rules.md');
@@ -32,6 +32,18 @@ function seed() {
     const pv = 'OpenAI Standard, ориентир из пакета Codex 24.09.2026 — сверить с openai.com/api/pricing';
     m.run('GPT-6 Sol', 'gpt-6-sol', 'responses', 2, null, 10, pv, now());
     m.run('GPT-6 Luna', 'gpt-6-luna', 'responses', 0.1, null, 0.5, pv, now());
+  }
+  // решение владельца 24.09: простая стратегия как в первой версии (без общего слоя), Sol скрыт (дорогой),
+  // добавлена простая разговорная модель gpt-4o-mini — на ней работала первая версия
+  ins.run('simple', 'v0.4.0', 'Простая (как первая версия)', read('simple.md'), null, 'active', now());
+  if (getSetting('lab_seeded_v040') !== '1') {
+    db.prepare("UPDATE lab_models SET active = 0 WHERE model = 'gpt-6-sol'").run();
+    if (!db.prepare("SELECT 1 FROM lab_models WHERE model = 'gpt-4o-mini'").get()) {
+      const luna = db.prepare("SELECT key_profile_id FROM lab_models WHERE model = 'gpt-6-luna'").get();
+      db.prepare('INSERT INTO lab_models(label, model, api, key_profile_id, price_in, price_cached_in, price_out, price_version, created) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run('GPT-4o mini', 'gpt-4o-mini', 'chat', luna?.key_profile_id || null, 0.15, 0.075, 0.6, 'OpenAI Standard, 24.09.2026 — сверить с openai.com/api/pricing', now());
+    }
+    setSetting('lab_seeded_v040', '1');
   }
   const c = db.prepare(`INSERT INTO lab_cases(id, set_name, version, title, facts, client_turns, turn_mode, expected, created) VALUES(?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET version = excluded.version, title = excluded.title, facts = excluded.facts, client_turns = excluded.client_turns, turn_mode = excluded.turn_mode, expected = excluded.expected`);
@@ -60,7 +72,7 @@ function models() {
 
 function strategies() {
   return db.prepare(`SELECT id, key, version, title, status, created FROM agent_versions WHERE status = 'active' ORDER BY
-    CASE key WHEN 'codex_business' THEN 1 WHEN 'codex_friendly' THEN 2 WHEN 'claude_independent' THEN 3 ELSE 4 END, id`).all();
+    CASE key WHEN 'codex_business' THEN 1 WHEN 'codex_friendly' THEN 2 WHEN 'claude_independent' THEN 3 WHEN 'simple' THEN 4 ELSE 5 END, id`).all();
 }
 
 function cases() {

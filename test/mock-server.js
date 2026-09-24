@@ -50,7 +50,7 @@ for (let i = 0; i < 260; i++) {
   });
 }
 
-const counters = { send: 0, read: 0, openai: 0, telegram: 0, keys: {}, responses: 0 };
+const counters = { send: 0, read: 0, openai: 0, telegram: 0, keys: {}, responses: 0, systems: {} };
 
 function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -120,6 +120,7 @@ const server = http.createServer(async (req, res) => {
     counters.openai++;
     const b = JSON.parse(raw || '{}');
     counters.keys[b.model] = req.headers.authorization;
+    counters.systems[b.model] = b.messages?.[0]?.content || '';
     if (b.model === 'bad-model') return json(res, 404, { error: { message: 'model not found' } });
     // модель без JSON-режима: 400 на response_format, без него — отвечает
     if (b.model === 'vendor/no-json' && b.response_format) return json(res, 400, { error: { message: 'response_format is not supported' } });

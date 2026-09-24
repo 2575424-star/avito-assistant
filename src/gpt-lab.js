@@ -18,11 +18,12 @@ for (const c of questions) db.prepare('INSERT OR IGNORE INTO lab_cases(id,set_na
 function versions() { return keys.map(key => db.prepare("SELECT id,key,title,version FROM agent_versions WHERE key=? AND version='egor-1'").get(key)); }
 function config() {
   const profiles = lab.profiles();
-  const models = ['gpt-6-sol', 'gpt-6-luna'].map(name => {
+  // решение владельца 24.09: Sol убран (дорогой), вместо него простая разговорная gpt-4o-mini
+  const models = ['gpt-6-luna', 'gpt-4o-mini'].map(name => {
     const matches = lab.models().filter(m => m.model === name);
     const model = matches.find(m => profiles.some(p => p.id === m.key_profile_id && p.has_key && p.provider === 'openai')) || matches[0];
     const profile = profiles.find(p => p.id === model?.key_profile_id);
-    return { id: model?.id, model: name, label: name.endsWith('sol') ? 'GPT-6 Sol' : 'GPT-6 Luna', profile: profile?.name || '', ready: Boolean(profile?.has_key && profile.provider === 'openai') };
+    return { id: model?.id, model: name, label: model?.label || name, profile: profile?.name || '', ready: Boolean(profile?.has_key && profile.provider === 'openai') };
   });
   return { strategies: versions(), models, questions };
 }
@@ -30,8 +31,7 @@ function start(body) {
   const ids = [...new Set(Array.isArray(body.caseIds) ? body.caseIds : [])];
   if (!ids.length || ids.length > 16 || ids.some(id => !questions.some(q => q.id === id))) throw new Error('Выберите от 1 до 16 контрольных вопросов');
   const c = config();
-  if (c.models.some(m => !m.ready)) throw new Error('Подключите отдельный профиль OpenAI к Sol и Luna в настройках существующей лаборатории');
-  if (new Set(c.models.map(m => lab.models().find(x => x.id === m.id).key_profile_id)).size !== 2) throw new Error('Для раздельного учёта назначьте Sol и Luna разные профили ключей');
+  if (c.models.some(m => !m.ready)) throw new Error('Подключите профиль ключа OpenAI к Luna и GPT-4o mini: Настройки → Ключи и модели');
   return lab.start({ caseIds: ids, versionIds: c.strategies.map(v => v.id), modelIds: c.models.map(m => m.id), repeats: 1, concurrency: 2, limitUsd: 25 }, (_, fn) => history.startJob('gpt_lab', fn));
 }
 function results(batch) {
