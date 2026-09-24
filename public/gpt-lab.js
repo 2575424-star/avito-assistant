@@ -4,7 +4,7 @@ async function renderGptLab() {
   const selected = new Set();
   let batch = '', busy = false, disposed = false, loading = false, lastJobStamp = '';
   view().innerHTML = `<div class="page-head"><h1>Лаборатория GPT</h1></div>
-    <p class="muted">Егор, менеджер отдела продаж автосалона InDrive. Два стиля × Sol и Luna. Ответы только здесь — клиентам ничего не отправляется.</p>
+    <p class="muted">Егор, менеджер отдела продаж автосалона InDrive. Два стиля × GPT-6 Luna и GPT-4o mini. Ответы только здесь — клиентам ничего не отправляется.</p>
     <div class="card"><h3>1. Выберите вопросы</h3><p class="small muted">Условия автомобилей учебные. Эталоны помогают оценить ответ, но не передаются модели как подсказка.</p>
     <div class="row">${cfg.models.map(m=>`<span class="badge">${esc(m.label)} · ${m.ready ? 'ключ подключён: '+esc(m.profile) : 'ключ не подключён'}</span>`).join('')}</div>
     <div class="row" style="margin:12px 0"><button class="btn sm" id="gAll">Выбрать все</button><button class="btn sm" id="gNone">Снять выбор</button></div>
