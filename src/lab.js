@@ -255,7 +255,7 @@ function estimate({ caseIds, versionIds, modelIds, repeats = 1, itemKey = null }
 }
 
 // ---------- Пакетный прогон ----------
-function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, limitUsd, itemKey = null }, startJob) {
+function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, limitUsd, itemKey = null }, startJob, options = {}) {
   const est = estimate({ caseIds, versionIds, modelIds, repeats, itemKey });
   const item = getItem(itemKey);
   if (itemKey && !item) throw new Error('Автомобиль не найден в базе знаний');
@@ -265,13 +265,14 @@ function start({ caseIds, versionIds, modelIds, repeats = 1, concurrency = 3, li
   if (!(limit > 0)) throw new Error('Укажите лимит расхода в долларах');
   const cs = cases().filter((c) => caseIds.includes(c.id));
   const vs = versionIds.map((id) => db.prepare('SELECT * FROM agent_versions WHERE id = ?').get(Number(id))).filter(Boolean);
-  const ms = models().filter((m) => modelIds.includes(m.id));
+  const ms = models().filter((m) => modelIds.includes(m.id)).map(m => ({...m, ...(options.requestParams?.(m) || {})}));
   const tasks = [];
   for (let r = 0; r < repeats; r++) for (const c of cs) for (const v of vs) for (const m of ms) tasks.push({ kase: c, version: v, model: m });
   const batch = 'lab' + Date.now();
   return startJob('lab', async (job) => {
     job.total = tasks.length;
     job.batch = batch;
+    job.models = ms.map(m => m.model);
     job.cost = 0;
     job.limit = limit;
     job.estimate = { low: est.low, high: est.high };

@@ -12,18 +12,20 @@ const titles = ['Егор · формальный', 'Егор · неформа�
 const now = () => Math.floor(Date.now() / 1000);
 keys.forEach((key, i) => db.prepare('INSERT OR IGNORE INTO agent_versions(key,version,title,base_prompt,strategy,status,created) VALUES(?,?,?,?,?,?,?)')
   .run(key, 'egor-1', titles[i], read('common.md'), read(i ? 'friendly.md' : 'formal.md'), 'lab_only', now()));
+// Preserve egor-1 snapshots; only the selected version advances.
+keys.forEach((key, i) => db.prepare('INSERT OR IGNORE INTO agent_versions(key,version,title,base_prompt,strategy,status,created) VALUES(?,?,?,?,?,?,?)')
+  .run(key, 'egor-2', titles[i], read('egor-2/common.md'), read(i ? 'egor-2/friendly.md' : 'egor-2/formal.md'), 'lab_only', now()));
 for (const c of questions) db.prepare('INSERT OR IGNORE INTO lab_cases(id,set_name,version,title,facts,client_turns,turn_mode,expected,created) VALUES(?,?,?,?,?,?,?,?,?)')
   .run(c.id, 'gpt_egor', c.version, c.title, JSON.stringify(c.facts), JSON.stringify(c.client_turns), c.turn_mode, JSON.stringify(c.expected), now());
 
-function versions() { return keys.map(key => db.prepare("SELECT id,key,title,version FROM agent_versions WHERE key=? AND version='egor-1'").get(key)); }
+function versions() { return keys.map(key => db.prepare("SELECT id,key,title,version FROM agent_versions WHERE key=? AND version='egor-2'").get(key)); }
 function config() {
   const profiles = lab.profiles();
-  // решение владельца 24.09: Sol убран (дорогой), вместо него простая разговорная gpt-4o-mini
   const models = ['gpt-6-luna', 'gpt-4o-mini'].map(name => {
     const matches = lab.models().filter(m => m.model === name);
     const model = matches.find(m => profiles.some(p => p.id === m.key_profile_id && p.has_key && p.provider === 'openai')) || matches[0];
     const profile = profiles.find(p => p.id === model?.key_profile_id);
-    return { id: model?.id, model: name, label: model?.label || name, profile: profile?.name || '', ready: Boolean(profile?.has_key && profile.provider === 'openai') };
+    return { id: model?.id, model: name, label: name === 'gpt-6-luna' ? 'GPT-6 Luna' : 'GPT-4o mini', profile: profile?.name || '', ready: Boolean(profile?.has_key && profile.provider === 'openai') };
   });
   return { strategies: versions(), models, questions };
 }
@@ -31,14 +33,21 @@ function start(body) {
   const ids = [...new Set(Array.isArray(body.caseIds) ? body.caseIds : [])];
   if (!ids.length || ids.length > 16 || ids.some(id => !questions.some(q => q.id === id))) throw new Error('Выберите от 1 до 16 контрольных вопросов');
   const c = config();
-  if (c.models.some(m => !m.ready)) throw new Error('Подключите профиль ключа OpenAI к Luna и GPT-4o mini: Настройки → Ключи и модели');
-  return lab.start({ caseIds: ids, versionIds: c.strategies.map(v => v.id), modelIds: c.models.map(m => m.id), repeats: 1, concurrency: 2, limitUsd: 25 }, (_, fn) => history.startJob('gpt_lab', fn));
+  const names = [...new Set(body.models || ['gpt-6-luna'])];
+  if (!names.length || names.some(name => !c.models.some(m => m.model === name))) throw new Error('Выберите Luna и/или GPT-4o mini');
+  const selected = c.models.filter(m => names.includes(m.model));
+  if (selected.some(m => !m.ready)) throw new Error('Подключите профиль OpenAI к выбранной модели в настройках «Ключи и модели»');
+  return lab.start({ caseIds: ids, versionIds: c.strategies.map(v => v.id), modelIds: selected.map(m => m.id), repeats: 1, concurrency: 2, limitUsd: 5 }, (_, fn) => history.startJob('gpt_lab', fn), {
+    requestParams: model => ({ reasoning_effort: model.model === 'gpt-6-luna' ? 'none' : null, max_output_tokens: 600 })
+  });
 }
 function results(batch) {
   const batches = db.prepare("SELECT DISTINCT r.batch, MAX(r.created) created FROM lab_runs r JOIN agent_versions v ON v.id=r.version_id WHERE v.key IN (?,?) GROUP BY r.batch ORDER BY created DESC, r.batch DESC LIMIT 50").all(...keys);
   const selected = batch || batches[0]?.batch || null;
-  const runs = selected ? lab.runs({ batch: selected, limit: 1000 }).filter(r => keys.includes(r.v_key)).map(r => ({ id:r.id, case_id:r.case_id, v_key:r.v_key, model:r.model, turns:r.turns.map(t => ({client:t.client,reply:t.reply,error:t.error})), status:r.status,error:r.error,correction:r.correction,comment:r.comment,critical:r.critical })) : [];
-  return { batch:selected, batches, runs, choices:selected ? db.prepare('SELECT * FROM gpt_lab_choices WHERE batch=?').all(selected) : [] };
+  const runs = selected ? lab.runs({ batch: selected, limit: 1000 }).filter(r => keys.includes(r.v_key)).map(r => ({ id:r.id, case_id:r.case_id, v_key:r.v_key, version:r.v_version, model:r.model, turns:r.turns.map(t => ({client:t.client,reply:t.reply,error:t.error})), status:r.status,error:r.error,correction:r.correction,comment:r.comment,critical:r.critical })) : [];
+  const active = history.jobState('gpt_lab');
+  const modelNames = active?.running && active.batch === selected ? active.models : [...new Set(runs.map(r => r.model))];
+  return { batch:selected, batches, runs, models:(modelNames || []).map(model => ({model,label:({'gpt-6-sol':'GPT-6 Sol','gpt-6-luna':'GPT-6 Luna','gpt-4o-mini':'GPT-4o mini'})[model] || model})), choices:selected ? db.prepare('SELECT * FROM gpt_lab_choices WHERE batch=?').all(selected) : [] };
 }
 function review(id, body) {
   const row = db.prepare('SELECT r.*,v.key FROM lab_runs r JOIN agent_versions v ON v.id=r.version_id WHERE r.id=?').get(Number(id));
