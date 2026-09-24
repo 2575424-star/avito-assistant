@@ -11,6 +11,7 @@ const knowledge = require('./knowledge');
 const history = require('./history');
 const billing = require('./billing');
 const lab = require('./lab');
+const gptLab = require('./gpt-lab');
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -450,6 +451,23 @@ async function api(req, res, url) {
   if (mm && m === 'DELETE') {
     db.prepare('DELETE FROM agent_runs WHERE id = ?').run(Number(mm[1]));
     return send(res, 200, { ok: true });
+  }
+
+  // Dedicated GPT laboratory: all routes are below the existing auth gate.
+  if (p.startsWith('/api/gpt-lab/')) {
+    try {
+      if (p === '/api/gpt-lab/config' && m === 'GET') return send(res, 200, gptLab.config());
+      if (p === '/api/gpt-lab/run' && m === 'POST') return send(res, 200, gptLab.start(await readBody(req)));
+      if (p === '/api/gpt-lab/results' && m === 'GET') return send(res, 200, gptLab.results(q.get('batch')));
+      if (p === '/api/gpt-lab/job' && m === 'GET') {
+        const j=history.jobState('gpt_lab');
+        return send(res,200,j ? {running:j.running,batch:j.batch,done:j.done,total:j.total,errors:j.errors,error:j.error,note:j.stop?'Остановлено: начатые запросы сохраняются':j.running?'Модели отвечают…':'Готово'} : null);
+      }
+      if (p === '/api/gpt-lab/stop' && m === 'POST') { history.stopJob('gpt_lab'); return send(res,200,{ok:true}); }
+      const match=p.match(/^\/api\/gpt-lab\/review\/(\d+)$/);
+      if(match && m === 'POST') {gptLab.review(match[1],await readBody(req));return send(res,200,{ok:true});}
+      return send(res,404,{error:'Not found'});
+    } catch(e) { return send(res,400,{error:e.message}); }
   }
 
   // ----- Лаборатория: стратегии × модели на тестовых сценариях (изолировано от чатов и Авито) -----

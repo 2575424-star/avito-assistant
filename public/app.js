@@ -83,7 +83,7 @@ $('#aiGlobal').addEventListener('change', async (e) => {
 });
 
 // ---------- router ----------
-const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings, archive: renderArchive, kb: renderKb, review: renderReview, lab: renderLab };
+const routes = { dashboard: renderDashboard, chats: renderChats, leads: renderLeads, settings: renderSettings, archive: renderArchive, kb: renderKb, review: renderReview, lab: renderLab, 'gpt-lab': renderGptLab };
 function route() {
   clearInterval(state.chatTimer);
   state.timers.forEach(clearInterval);
