@@ -47,7 +47,7 @@ function seed() {
   }
   const c = db.prepare(`INSERT INTO lab_cases(id, set_name, version, title, facts, client_turns, turn_mode, expected, created) VALUES(?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET version = excluded.version, title = excluded.title, facts = excluded.facts, client_turns = excluded.client_turns, turn_mode = excluded.turn_mode, expected = excluded.expected`);
-  for (const [file, set] of [['standard_questions.jsonl', 'standard'], ['faq_questions.jsonl', 'faq']]) {
+  for (const [file, set] of [['standard_questions.jsonl', 'standard'], ['faq_questions.jsonl', 'faq'], ['archive_questions.jsonl', 'archive']]) {
     for (const line of read(file).trim().split('\n')) {
       const x = JSON.parse(line);
       c.run(x.id, set, x.version, x.title, JSON.stringify(x.facts || {}), JSON.stringify(x.client_turns), x.turn_mode, JSON.stringify(x.expected || []), now());
@@ -377,6 +377,46 @@ function exportCsv({ batch } = {}) {
   return '\ufeff' + lines.join('\n');
 }
 
+// ---------- Пояснения владельца к вопросам (из них собираются факты салона для агента) ----------
+/** Вопросы набора + последний ответ агента (предпочтительно «Простая» × GPT-4o mini) + пояснение владельца. */
+function notes({ set = 'archive' } = {}) {
+  const saved = Object.fromEntries(db.prepare('SELECT case_id, note, updated FROM lab_case_notes').all().map((n) => [n.case_id, n]));
+  return cases().filter((c) => c.set_name === set).map((c) => {
+    const ok = runs({ caseId: c.id, limit: 200 }).filter((r) => r.status === 'ok');
+    const best = ok.find((r) => r.v_key === 'simple' && r.model === 'gpt-4o-mini') || ok[0] || null;
+    return {
+      id: c.id, title: c.title, client_turns: c.client_turns,
+      answer: best ? { run_id: best.id, by: `${best.v_key} ${best.v_version} · ${best.model_label || best.model}`, created: best.created, turns: best.turns.map((t) => ({ client: t.client, reply: t.reply })) } : null,
+      note: saved[c.id]?.note || '', note_updated: saved[c.id]?.updated || null,
+    };
+  });
+}
+
+function saveNote(caseId, note) {
+  if (!db.prepare('SELECT 1 FROM lab_cases WHERE id = ?').get(String(caseId))) throw new Error('Вопрос не найден');
+  db.prepare('INSERT INTO lab_case_notes(case_id, note, updated) VALUES(?,?,?) ON CONFLICT(case_id) DO UPDATE SET note = excluded.note, updated = excluded.updated')
+    .run(String(caseId), String(note || '').slice(0, 20000), now());
+}
+
+/** Отчёт для Excel: вопрос, ответ агента, пояснение владельца. */
+function notesCsv({ set = 'archive' } = {}) {
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['№', 'Вопрос', 'Сообщения клиента', 'Ответ агента', 'Кто ответил', 'Пояснение Павла'].map(esc).join(';')];
+  for (const n of notes({ set })) {
+    const answer = n.answer ? n.answer.turns.map((t) => (n.answer.turns.length > 1 ? `Клиент: ${t.client}\nАгент: ` : '') + (t.reply ?? '')).join('\n\n') : '';
+    lines.push([n.id, n.title, n.client_turns.join(' / '), answer, n.answer?.by || '', n.note].map(esc).join(';'));
+  }
+  return '\ufeff' + lines.join('\n');
+}
+
+/** Профиль ключа для распознавания речи: ключ модели GPT-4o mini, иначе любой профиль OpenAI с ключом. */
+function transcribeProfile() {
+  const m = models().find((x) => x.model === 'gpt-4o-mini' && x.key_profile_id);
+  const p = m && profileWithSecret(m.key_profile_id);
+  if (p?.api_key && p.provider === 'openai') return p;
+  return db.prepare("SELECT * FROM key_profiles WHERE provider = 'openai' AND api_key IS NOT NULL AND api_key != '' ORDER BY id").get() || null;
+}
+
 /** Экспорт: результаты + конфигурации + сценарии. Ключей в экспорте нет — только имена профилей. */
 function exportAll({ batch } = {}) {
   return {
@@ -390,4 +430,4 @@ function exportAll({ batch } = {}) {
   };
 }
 
-module.exports = { batches, exportCsv, LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };
+module.exports = { notes, saveNote, notesCsv, transcribeProfile, batches, exportCsv, LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };

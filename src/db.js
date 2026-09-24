@@ -194,6 +194,11 @@ CREATE TABLE IF NOT EXISTS lab_models (
   active INTEGER DEFAULT 1,
   created INTEGER
 );
+CREATE TABLE IF NOT EXISTS lab_case_notes (   -- пояснения владельца к вопросам «Лаборатории» (условия и особенности салона)
+  case_id TEXT PRIMARY KEY,
+  note TEXT,
+  updated INTEGER
+);
 CREATE TABLE IF NOT EXISTS lab_cases (
   id TEXT PRIMARY KEY,
   set_name TEXT,                    -- standard / faq / custom

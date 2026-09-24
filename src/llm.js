@@ -108,4 +108,18 @@ async function call(p) {
   throw new Error('Не удалось подобрать параметры запроса');
 }
 
-module.exports = { call, costUsd, readUsage, scrub };
+/** Распознавание речи (OpenAI Audio Transcriptions). buf — Buffer с записью, mime — тип записи браузера. */
+async function transcribe({ profile, buf, mime = 'audio/webm', model = 'gpt-4o-mini-transcribe', language = 'ru' }) {
+  if (!profile?.api_key) throw new Error('Нет ключа OpenAI для распознавания речи: Настройки → Ключи и модели');
+  const ext = /mp4|m4a|aac/.test(mime) ? 'mp4' : /ogg/.test(mime) ? 'ogg' : /wav/.test(mime) ? 'wav' : /mpeg|mp3/.test(mime) ? 'mp3' : 'webm';
+  const form = new FormData();
+  form.append('file', new Blob([buf], { type: mime.split(';')[0] }), 'voice.' + ext);
+  form.append('model', model);
+  form.append('language', language);
+  const res = await fetch(baseUrl(profile) + '/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + profile.api_key }, body: form });
+  const text = await res.text();
+  if (!res.ok) throw new Error(scrub(`Распознавание: HTTP ${res.status} ${text.slice(0, 300)}`));
+  try { return String(JSON.parse(text).text || '').trim(); } catch { return text.trim(); }
+}
+
+module.exports = { call, costUsd, readUsage, scrub, transcribe };

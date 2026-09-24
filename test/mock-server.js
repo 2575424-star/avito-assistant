@@ -116,6 +116,14 @@ const server = http.createServer(async (req, res) => {
       usage: { input_tokens: 5000, input_tokens_details: { cached_tokens: 1000 }, output_tokens: 300, output_tokens_details: { reasoning_tokens: 120 } } });
   }
 
+  // ---- OpenAI Audio (голосовой ввод пояснений) ----
+  if (p === '/v1/audio/transcriptions') {
+    counters.transcribe = (counters.transcribe || 0) + 1;
+    counters.keys.transcribe = req.headers.authorization;
+    if (!/multipart\/form-data/.test(req.headers['content-type'] || '') || !raw.includes('gpt-4o-mini-transcribe')) return json(res, 400, { error: { message: 'bad request' } });
+    return json(res, 200, { text: 'Кредит от шести процентов, трейд-ин с выгодой.' });
+  }
+
   if (p === '/v1/chat/completions') {
     counters.openai++;
     const b = JSON.parse(raw || '{}');
