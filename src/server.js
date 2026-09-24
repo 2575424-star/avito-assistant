@@ -94,7 +94,9 @@ function dashboard(from, to) {
       bot: one("SELECT COUNT(*) v FROM messages WHERE source IN ('bot','quick','template') AND created BETWEEN ? AND ?", d, d + 86399),
     });
   }
-  return { incoming, leads, leadsIn, conversion: incoming ? Math.round((leadsIn / incoming) * 1000) / 10 : 0, botMsgs, clientMsgs, botChats, handoffs, waiting, totalChats, days };
+  // конверсия — по одной группе: входящие чаты периода и телефон от них за 7 дней (см. history.managerStats)
+  const cohort = history.managerStats(from, to);
+  return { incoming: cohort.chats, leads, leadsIn, conversion: cohort.conversion, cohort, botMsgs, clientMsgs, botChats, handoffs, waiting, totalChats, days };
 }
 
 // ---------- роутинг ----------
@@ -328,6 +330,9 @@ async function api(req, res, url) {
     const b = await readBody(req);
     if (!avito.isConfigured()) return send(res, 400, { error: 'Сначала подключите Авито' });
     try { return send(res, 200, history.importHistory({ maxChats: Number(b.maxChats) || 100000 })); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/archive/recount' && m === 'POST') {
+    return send(res, 200, history.recountLeads());
   }
   if (p === '/api/archive/stats') {
     const { from, to } = periodFromQuery(q);

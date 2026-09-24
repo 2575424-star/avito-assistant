@@ -2,6 +2,7 @@
 const { db, getSetting, setSetting, logEvent } = require('./db');
 const avito = require('./avito');
 const agent = require('./agent');
+const chatstate = require('./chatstate');
 
 const now = () => Math.floor(Date.now() / 1000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -103,8 +104,9 @@ function storeMessages(chatId, apiMessages, uid) {
 function markLead(chatId, phone, how = 'чат', { at = now(), silent = false } = {}) {
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId);
   if (!chat || chat.phone) return false;
-  const first = db.prepare('SELECT direction, source FROM messages WHERE chat_id = ? ORDER BY created ASC LIMIT 1').get(chatId);
-  const channel = first && first.direction === 'out' ? 'Исходящий' : 'Входящий';
+  // канал — по первому живому сообщению, системные уведомления Авито не считаются
+  const msgs = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(chatId);
+  const channel = chatstate.direction(msgs) === 'outgoing' ? 'Исходящий' : 'Входящий';
   db.prepare("UPDATE chats SET phone = ?, lead_at = ?, lead_channel = ?, status = CASE WHEN status = 'manager' THEN status ELSE 'lead' END WHERE id = ?")
     .run(phone, at, channel, chatId);
   if (silent) return true; // загрузка истории: без журнала и уведомлений
@@ -144,12 +146,9 @@ function afterNewMessages(chatId, fresh) {
   if (!fresh.length) return;
   const startedAt = Number(getSetting('ai_started_at') || 0);
   let schedule = false;
+  if (fresh.some((m) => m.source === 'client')) detectLead(chatId, 'из сообщения клиента');
   for (const m of fresh) {
     if (m.source === 'client') {
-      const phone = agent.extractPhone(m.text);
-      // старые сообщения (первая синхронизация) фиксируем датой сообщения и без уведомлений
-      const old = (m.created || now()) < now() - 3600;
-      if (phone) markLead(chatId, phone, 'из сообщения клиента', old ? { at: m.created, silent: true } : {});
       if (m.created >= startedAt) schedule = true;
     }
     if (m.source === 'system') {
@@ -165,6 +164,20 @@ function afterNewMessages(chatId, fresh) {
     }
   }
   if (schedule) scheduleReply(chatId);
+}
+
+/**
+ * Найти телефон клиента во всей переписке (в том числе разбитый на два сообщения)
+ * и зафиксировать лид датой сообщения. Старые номера — без уведомлений.
+ */
+function detectLead(chatId, how) {
+  const chat = db.prepare('SELECT phone FROM chats WHERE id = ?').get(chatId);
+  if (!chat || chat.phone) return false;
+  const msgs = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created ASC, rowid ASC').all(chatId);
+  const found = chatstate.findPhone(msgs);
+  if (!found) return false;
+  const old = (found.at || now()) < now() - 3600;
+  return markLead(chatId, found.phone, how, old ? { at: found.at, silent: true } : { at: found.at || now() });
 }
 
 function recordSystem(m) {
@@ -399,6 +412,6 @@ function enableAI(on) {
 
 module.exports = {
   pollOnce, startPolling, syncChat, processChat, scheduleReply, sendAndStore, markLead, notify, enableAI,
-  saveRun, storeMessages, upsertChat: (c, uid) => upsertChatStmt.run({ ...chatFromApi(c, uid), synced_at: now() }),
+  saveRun, storeMessages, detectLead, upsertChat: (c, uid) => upsertChatStmt.run({ ...chatFromApi(c, uid), synced_at: now() }),
   getLastPoll: () => lastPoll,
 };

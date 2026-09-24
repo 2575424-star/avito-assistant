@@ -11,26 +11,10 @@ function compareModels() {
   return [...new Set(list)];
 }
 
-// ---------- Телефоны ----------
-const PHONE_RE = /(?:\+?\s*[78])?[\s\-–(]*\d{3}[\s\-–)]*\d{3}[\s\-–]*\d{2}[\s\-–]*\d{2}/g;
-
-function normalizePhone(raw) {
-  let d = String(raw).replace(/\D/g, '');
-  if (d.length === 10 && d[0] === '9') d = '7' + d;
-  if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1);
-  if (d.length !== 11 || d[0] !== '7' || d[1] !== '9') return null; // только мобильные РФ
-  return '+' + d;
-}
-
-function extractPhone(text) {
-  if (!text) return null;
-  const matches = String(text).match(PHONE_RE) || [];
-  for (const m of matches) {
-    const p = normalizePhone(m);
-    if (p) return p;
-  }
-  return null;
-}
+// ---------- Телефоны и состояние чата: общий модуль для импорта, живых чатов и агента ----------
+const chatstate = require('./chatstate');
+const { normalizePhone } = chatstate;
+const extractPhone = chatstate.phoneInText;
 
 // ---------- Промпт ----------
 function buildSystemPrompt(ctx = {}) {
@@ -68,6 +52,7 @@ function buildSystemPrompt(ctx = {}) {
   const stock = knowledge.stockList(stored?.key);
   if (stock) parts.push('ДРУГИЕ АВТОМОБИЛИ В ПРОДАЖЕ (для подбора альтернативы; подробности уточнит менеджер):\n' + stock);
 
+  if (ctx.chatState) parts.push(chatstate.cpaPromptLine(ctx.chatState));
   if (ctx.phone) parts.push(`Клиент уже оставил телефон: ${ctx.phone}. Повторно номер не проси.`);
   if (ctx.alreadyGreeted) parts.push('Ты уже здоровался в этом чате — не здоровайся повторно.');
 
@@ -155,7 +140,9 @@ async function generateReply(ctx, opts = {}) {
   const alreadyGreeted = (ctx.history || []).some((m) => m.direction === 'out' && /здравствуйте|добрый (день|вечер)|привет/i.test(m.text || ''));
   // последние сообщения клиента — по ним ищем нужные записи в базе знаний
   const queryText = (ctx.history || []).filter((m) => m.direction === 'in' && m.source !== 'system').slice(-3).map((m) => m.text).join('\n');
-  const system = buildSystemPrompt({ ...ctx, alreadyGreeted, queryText });
+  const history = ctx.history || [];
+  const found = chatstate.findPhone(history);
+  const system = buildSystemPrompt({ ...ctx, phone: ctx.phone || found?.phone || null, alreadyGreeted, queryText, chatState: chatstate.cpaState(history) });
   const messages = [{ role: 'system', content: system }, ...historyToMessages(ctx.history || [])];
   const started = Date.now();
   const { content, usage, model } = await callOpenAI(messages, { model: opts.model });
@@ -165,7 +152,7 @@ async function generateReply(ctx, opts = {}) {
   const clientText = (ctx.history || []).filter((m) => m.direction === 'in' && m.type !== 'system').map((m) => m.text).join('\n');
   const digits = clientText.replace(/\D/g, '');
   const modelPhoneOk = parsed.phone && digits.includes(parsed.phone.slice(2)); // модель не должна выдумать номер
-  const phone = extractPhone(clientText) || (modelPhoneOk ? parsed.phone : null);
+  const phone = found?.phone || (modelPhoneOk ? parsed.phone : null);
   return { ...parsed, phone, usage, model, ms, systemPrompt: system };
 }
 

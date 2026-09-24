@@ -125,8 +125,9 @@ async function renderDashboard() {
     <div class="grid c3" style="margin-top:16px">
       <div class="card"><h3><span class="dot" style="background:var(--accent)"></span>ВХОДЯЩИЕ ЧАТЫ</h3><div class="stat-list">
         <div><span>Новых входящих чатов</span><b>${d.incoming}</b></div>
-        <div><span>Успешные</span><b>${d.leadsIn}</b></div>
-        <div><span>Конверсия</span><b>${d.conversion}%</b></div></div></div>
+        <div><span>Из них дали телефон за 7 дней</span><b>${d.cohort.leads7d} из ${d.cohort.cohortBase}</b></div>
+        <div><span>Конверсия (зрелые чаты)</span><b>${d.conversion}%</b></div>
+        <div><span>Ещё зреют (моложе 7 дней)</span><b>${d.cohort.immature}</b></div></div></div>
       <div class="card"><h3><span class="dot" style="background:var(--green)"></span>РАБОТА БОТА</h3><div class="stat-list">
         <div><span>Сообщений отправлено</span><b>${d.botMsgs}</b></div>
         <div><span>Чатов с ответом бота</span><b>${d.botChats}</b></div>
@@ -711,20 +712,25 @@ async function renderArchive() {
     const d = await api('/api/archive/stats?' + ($('#stFrom').value ? qs : `to=${$('#stTo').value}`));
     $('#stBox').innerHTML = !d.chats ? `<div class="muted">Пока нет входящих чатов в базе (всего чатов: ${d.totalChats}). Загрузите историю.</div>` : `
       <div class="kpis">
-        <div class="kpi"><span>Входящих чатов</span><b>${d.chats}</b></div>
-        <div class="kpi"><span>Оставили телефон</span><b>${d.leads} · ${d.conversion}%</b></div>
+        <div class="kpi"><span>Входящих чатов (зрелых)</span><b>${d.chats} (${d.mature})</b></div>
+        <div class="kpi"><span>Телефон за 7 дней (зрелые чаты)</span><b>${d.leads7d} из ${d.cohortBase} · ${d.conversion}%</b></div>
         <div class="kpi"><span>Без ответа продавца</span><b style="color:${d.unanswered ? 'var(--red)' : 'inherit'}">${d.unanswered}</b></div>
         <div class="kpi"><span>Продавец просил телефон</span><b>${d.askedPhonePct}%</b></div>
         <div class="kpi"><span>Первый ответ (медиана)</span><b>${fmtDur(d.medianFirstResponse)}</b></div>
         <div class="kpi"><span>днём 9–21 / ночью</span><b>${fmtDur(d.medianFirstResponseDay)} / ${fmtDur(d.medianFirstResponseNight)}</b></div>
         <div class="kpi"><span>Ответ за 5 мин / за час</span><b>${d.within5Pct}% / ${d.within60Pct}%</b></div>
         <div class="kpi"><span>Ушли после ответа без телефона</span><b>${d.lostAfterReply}</b></div>
+        <div class="kpi"><span>Вероятно платных чатов (оценка)</span><b>${d.billedEst}</b></div>
+        <div class="kpi"><span>Из них без телефона</span><b style="color:${d.billedNoPhone ? 'var(--orange)' : 'inherit'}">${d.billedNoPhone}</b></div>
+        <div class="kpi"><span>Телефон до ответа продавца</span><b>${d.leadsBeforeReply}</b></div>
+        <div class="kpi"><span>Исходящие чаты / с телефоном</span><b>${d.outgoing} / ${d.outgoingLeads}</b></div>
       </div>
+      <div class="muted small" style="margin-top:8px">Конверсия считается по одной группе: входящие чаты, начатые в периоде, и телефон от них в течение ${d.cohortDays} дней; телефон, оставленный до ответа продавца, не засчитывается; чаты моложе ${d.cohortDays} дней (${d.immature}) ещё зреют. «Платные» — оценка по правилам Авито п. 3.1: ${d.billedBy.map((x) => `${esc(x.label)} — ${x.n}`).join(', ') || '—'}. Факт списаний — в блоке «Расходы Авито». <button class="link" id="recount">Пересчитать телефоны по всей базе</button></div>
       <div class="muted small" style="margin:10px 0">Загружено полностью: ${d.loadedChats} из ${d.totalChats} чатов, сообщений ${d.totalMessages}. В среднем на чат: клиент ${d.avgClientMsgs}, продавец ${d.avgSellerMsgs} сообщ.
         ${d.authors.length > 1 ? '<br>Сообщения продавца по авторам (ID сотрудника): ' + d.authors.map((a) => `${esc(a.id)} — ${a.messages}`).join(', ') : ''}
         <br>Ответы прежнего бота («ИИ Диалоги») Авито не отличает от ответов продавцов — они тоже считаются здесь.</div>
-      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Месяц</th><th>Чатов</th><th>С ответом</th><th>Телефон</th><th>Конверсия</th><th>Первый ответ</th></tr></thead><tbody>
-        ${d.months.map((m) => `<tr><td>${m.month}</td><td>${m.chats}</td><td>${m.answered}</td><td>${m.leads}</td><td>${m.conversion}%</td><td>${fmtDur(m.medianFirstResponse)}</td></tr>`).join('')}
+      <div class="table-wrap" style="box-shadow:none"><table class="table"><thead><tr><th>Месяц</th><th>Чатов</th><th>С ответом</th><th>Телефон за 7 дней</th><th>Конверсия</th><th>Первый ответ</th></tr></thead><tbody>
+        ${d.months.map((m) => `<tr><td>${m.month}</td><td>${m.chats}</td><td>${m.answered}</td><td>${m.leads}</td><td>${m.conversion === null ? 'зреет' : m.conversion + '%'}</td><td>${fmtDur(m.medianFirstResponse)}</td></tr>`).join('')}
       </tbody></table></div>`;
   };
   const loadReport = async () => {
@@ -757,6 +763,12 @@ async function renderArchive() {
     $$('[data-faq]', box).forEach((b) => b.addEventListener('click', () => { const f = r.faq[Number(b.dataset.faq)]; addKb([{ category: 'faq', title: f.q, content: f.a, source: 'analysis' }], b); }));
     $('#addAllFaq')?.addEventListener('click', (e) => addKb(r.faq.map((f) => ({ category: 'faq', title: f.q, content: f.a, source: 'analysis' })), e.target));
   };
+  view().addEventListener('click', async (e) => {
+    if (e.target.id !== 'recount') return;
+    const r = await api('/api/archive/recount', { body: {} });
+    toast(`Проверено чатов без телефона: ${r.checked}, найдено номеров: ${r.found}`);
+    loadStats();
+  });
   $('#stFrom').addEventListener('change', loadStats);
   $('#stTo').addEventListener('change', loadStats);
   $('#impStart').addEventListener('click', async () => {
