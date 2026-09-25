@@ -1177,6 +1177,9 @@ async function renderLab() {
             const list = cfg.items.filter((it) => (it.availability || '') === k);
             return list.length ? `<optgroup label="${l} (${list.length})">${list.map((it) => `<option value="${esc(it.key)}" ${L.item === it.key ? 'selected' : ''}>${esc(it.title)}${it.price ? ' · ' + Number(it.price).toLocaleString('ru-RU') + ' ₽' : ''}</option>`).join('')}</optgroup>` : '';
           }).join('')}</select></label>
+        <div class="row small" id="askAvailRow" style="margin-top:6px;gap:6px;${L.item ? '' : 'display:none'}"><span class="muted">Наличие этой машины:</span>
+          ${[['in_stock', 'в наличии'], ['in_transit', 'в пути'], ['on_order', 'под заказ'], ['', 'не указано']].map(([k, l]) => `<button class="chip ${(cfg.items.find((x) => x.key === L.item)?.availability || '') === k ? 'active' : ''}" data-setav="${k}">${l}</button>`).join('')}
+          <span class="muted">— отметка сохраняется в «Базе знаний» и работает у рабочего агента</span></div>
         <label style="margin-top:8px">Вопрос клиента <span class="field-help" style="display:inline">— несколько сообщений подряд разделяйте пустой строкой</span>
           <textarea id="askText" rows="2" placeholder="Здравствуйте! Авто в наличии?"></textarea></label>
         <div class="row small" style="margin-top:6px;gap:6px">
@@ -1392,7 +1395,10 @@ async function renderLab() {
   });
   // ----- быстрый вопрос агенту по реальной машине -----
   const AV = { in_stock: 'в наличии', in_transit: 'в пути', on_order: 'под заказ' };
-  $('#askItem').addEventListener('change', (e) => { L.item = e.target.value; const sel = $('#labItem'); if (sel) sel.value = L.item; updEst(); });
+  $('#askItem').addEventListener('change', (e) => { L.item = e.target.value; renderLab(); });
+  $$('[data-setav]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('/api/items/availability', { body: { keys: [L.item], value: b.dataset.setav || null } }); toast('Наличие отмечено'); renderLab(); } catch (e) { toast(e.message, true); }
+  }));
   $$('[data-askq]').forEach((b) => b.addEventListener('click', () => { $('#askText').value = b.dataset.askq; $('#askText').focus(); }));
   $('#askMic').addEventListener('click', () => voiceInput($('#askMic'), $('#askState'), (t) => { $('#askText').value = ($('#askText').value.trim() ? $('#askText').value.trim() + ' ' : '') + t; $('#askState').textContent = ''; }));
   $('#askGo').addEventListener('click', async () => {
