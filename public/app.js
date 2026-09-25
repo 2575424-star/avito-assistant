@@ -962,6 +962,7 @@ async function kbCars(box, query = '') {
       <div class="muted small">Из Авито API приходят название, цена, статус и ссылка. Полное описание, комплектация, VIN и пробег есть только в XML-фиде автозагрузки — его адрес можно взять из профиля автозагрузки Авито автоматически. Агент видит карточку машины, по которой пишет клиент, и короткий список остальных машин в продаже.</div>
       <div class="row" style="margin-top:12px"><button class="btn primary" id="itApi">⬇ Объявления из Авито</button></div>
       <div class="row" style="margin-top:12px"><input type="text" id="feedUrl" value="${esc(d.feedUrl || '')}" placeholder="URL XML-фида (пусто — взять из профиля автозагрузки Авито)" style="flex:1;min-width:260px"><button class="btn" id="itFeed">⬇ Загрузить фид</button></div>
+      <div class="muted small" style="margin-top:6px">Наличие («в наличии / в пути»), описание и параметры машин Авито отдаёт только в фиде автозагрузки. Сервис сам обновляет объявления и фид каждые ${d.feedSyncHours || 3} ч${d.feedSyncedAt ? ` · последнее автообновление: ${fmtTime(d.feedSyncedAt)}` : ' · автообновление ещё не проходило (первое — через минуту после запуска)'}.</div>
       <div class="muted small" style="margin-top:10px">В базе: ${st.total || 0} · в продаже ${st.active || 0} · с описанием ${st.with_desc || 0} · из фида ${st.from_feed || 0}</div>
     </div>
     <div class="card"><h3>Наличие: в наличии или в пути</h3>

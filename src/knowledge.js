@@ -315,13 +315,45 @@ async function importFeed(url) {
   return { count: total, mapped, url: urls.join(', '), ...st };
 }
 
+// ---------- Автообновление: объявления из API + фид автозагрузки (наличие, описание, параметры) ----------
+// API Авито не отдаёт параметры объявления (наличие «в наличии / в пути», описание, комплектацию) — они есть только
+// в фиде автозагрузки. Поэтому сервер сам забирает фид по расписанию (URL — из профиля автозагрузки).
+let feedTimer = null;
+function feedSyncMs() {
+  if (process.env.FEED_SYNC_MS) return Number(process.env.FEED_SYNC_MS);
+  return feedSyncHours() > 0 ? Math.max(0.25, feedSyncHours()) * 3600e3 : 0;
+}
+/** Интервал автообновления в часах (настройка feed_sync_hours; пусто — 3 ч, 0 — выключено). */
+function feedSyncHours() {
+  const v = getSetting('feed_sync_hours');
+  return v === '' || v == null ? 3 : Number(v);
+}
+async function syncFeedOnce() {
+  if (!getSetting('avito_client_id')) return null;
+  await importItemsFromApi().catch((e) => logEvent('kb', 'Автообновление: объявления из API не загрузились: ' + e.message, null, 'warn'));
+  const r = await importFeed();
+  setSetting('feed_synced_at', String(now()));
+  return r;
+}
+function startFeedSync() {
+  if (feedTimer) return;
+  const run = async () => {
+    const ms = feedSyncMs();
+    if (ms) {
+      try { await syncFeedOnce(); } catch (e) { logEvent('kb', 'Автообновление фида не удалось: ' + e.message, null, 'warn'); }
+    }
+    feedTimer = setTimeout(run, ms || 3600e3);
+  };
+  feedTimer = setTimeout(run, Number(process.env.FEED_SYNC_DELAY_MS || 60e3));
+}
+
 /** Факты салона, утверждённые владельцем (src/salon_facts.md) — общие для рабочего агента и «Лаборатории». */
 function salonFacts() {
   try { return require('node:fs').readFileSync(require('node:path').join(__dirname, 'salon_facts.md'), 'utf8').trim(); } catch { return ''; }
 }
 
 module.exports = {
-  salonFacts, AVAIL_PROMPT,
+  feedSyncHours, startFeedSync, syncFeedOnce, salonFacts, AVAIL_PROMPT,
   AVAIL_RU, detectAvailability, KB_CATEGORIES, selectKb, kbPromptSections, itemCard, getItem, stockList, itemsStats,
   importItemsFromApi, importFeed, parseFeed, htmlToText, fetchFeedUrl, fmtPrice,
 };
