@@ -18,6 +18,7 @@ const app = spawn(process.execPath, ['--no-warnings', path.join(__dirname, '..',
     AVITO_API_BASE: `http://127.0.0.1:${MOCK_PORT}`, OPENAI_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`,
     AVITO_CLIENT_ID: 'id', AVITO_CLIENT_SECRET: 'secret', OPENAI_API_KEY: 'sk-test',
     OPENROUTER_BASE_URL: `http://127.0.0.1:${MOCK_PORT}/v1`, OPENROUTER_API_KEY: 'sk-or-test',
+    FEED_SYNC_DELAY_MS: '3600000', // автообновление фида не вмешивается в шаги теста
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

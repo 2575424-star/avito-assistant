@@ -655,7 +655,7 @@ async function api(req, res, url) {
     const rows = db.prepare(`SELECT key, avito_id, ad_id, title, price, url, status, vin, year, mileage, source, updated, length(description) desc_len,
       availability, availability_src, availability_manual,
       (SELECT COUNT(*) FROM chats c WHERE c.item_id = items.avito_id) chats FROM items ${where} ORDER BY status = 'active' DESC, title LIMIT 500`).all(...args);
-    return send(res, 200, { items: rows, stats: knowledge.itemsStats(), feedUrl: getSetting('feed_url') });
+    return send(res, 200, { items: rows, stats: knowledge.itemsStats(), feedUrl: getSetting('feed_url'), feedSyncedAt: Number(getSetting('feed_synced_at')) || null, feedSyncHours: knowledge.feedSyncHours() });
   }
   if (p === '/api/items/import-api' && m === 'POST') {
     try { return send(res, 200, await knowledge.importItemsFromApi()); } catch (e) { logEvent('kb', 'Объявления не загрузились: ' + e.message, null, 'error'); return send(res, 400, { error: e.message }); }
@@ -741,4 +741,5 @@ server.listen(PORT, () => {
   console.log(`Avito Assistant слушает порт ${PORT}`);
   if (!SESSION) console.warn('ВНИМАНИЕ: ADMIN_PASSWORD не задан — интерфейс открыт без пароля');
   engine.startPolling();
+  knowledge.startFeedSync();
 });
