@@ -194,7 +194,7 @@ async function api(req, res, url) {
     const offset = Number(q.get('offset') || 0);
     const sqlWhere = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const total = db.prepare(`SELECT COUNT(*) c FROM chats c ${sqlWhere}`).get(...args).c;
-    const rows = db.prepare(`SELECT c.* FROM chats c ${sqlWhere} ORDER BY COALESCE(c.last_at, c.updated) DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const rows = db.prepare(`SELECT c.*, (SELECT COALESCE(i.availability_manual, i.availability) FROM items i WHERE i.avito_id = c.item_id LIMIT 1) AS item_availability FROM chats c ${sqlWhere} ORDER BY COALESCE(c.last_at, c.updated) DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     return send(res, 200, { total, chats: rows });
   }
 
@@ -517,6 +517,10 @@ async function api(req, res, url) {
     return send(res, 200, { summary: lab.summary({ batch: q.get('batch') || undefined, set: q.get('set') || undefined }) });
   }
   if (p === '/api/lab/batches') return send(res, 200, { batches: lab.batches() });
+  if (p === '/api/lab/ask' && m === 'POST') {
+    const b = await readBody(req);
+    try { return send(res, 200, { run: await lab.ask(b) }); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
   // ----- пояснения владельца к вопросам и голосовой ввод -----
   if (p === '/api/lab/notes' && m === 'GET') return send(res, 200, { notes: lab.notes({ set: q.get('set') || 'archive' }) });
   if (p === '/api/lab/notes' && m === 'POST') {

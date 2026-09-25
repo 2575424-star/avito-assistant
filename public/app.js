@@ -204,7 +204,7 @@ async function loadChatList(silent) {
       <div class="body">
         <div class="top"><span class="name">${esc(c.client_name || 'Покупатель')}</span>
           <span class="row" style="gap:6px;flex-wrap:nowrap">${c.needs_reply ? '<span class="badge orange">без ответа</span>' : ''}<span class="small muted">${fmtTime(c.last_at || c.updated)}</span></span></div>
-        <div class="item">${esc(c.item_title || 'Личный чат')}</div>
+        <div class="item">${esc(c.item_title || 'Личный чат')}${c.item_title ? ` ${{ in_stock: '<span class="badge green">в наличии</span>', in_transit: '<span class="badge blue">в пути</span>', on_order: '<span class="badge orange">под заказ</span>' }[c.item_availability] || '<span class="badge">наличие ?</span>'}` : ''}</div>
         <div class="small" style="color:${c.status === 'manager' ? 'var(--orange)' : c.ai_enabled ? 'var(--green)' : 'var(--muted)'}">${c.status === 'manager' ? 'У менеджера' : c.ai_enabled ? 'AI активен' : 'AI выключен'}</div>
         <div class="preview">${c.last_direction === 'out' ? '↪ ' : ''}${esc(c.last_text || '')}</div>
         ${c.phone ? `<div class="tags"><span class="badge green">Контакт</span><span class="badge">${esc(c.phone)}</span></div>` : ''}
@@ -1170,7 +1170,21 @@ async function renderLab() {
     <div class="card"><div class="row"><h3 style="margin:0">Вопросы клиентов из архива: ответ агента и ваши пояснения</h3><span class="spacer"></span>
       <button class="btn primary sm" id="arcGen">▶ Сгенерировать ответы агента</button>
       <a class="btn sm" href="/api/lab/notes.csv">⬇ Скачать отчёт (Excel)</a></div>
-      <div class="muted small" style="margin-top:6px">36 вопросов, объединённых по смыслу из всех чатов архива. Ответ даёт стратегия «Простая» на GPT-4o mini${''} (машина — из поля «Автомобиль» ниже, если выбрана). В правой колонке напишите или надиктуйте 🎤 наши условия и особенности: кредитные программы, скидки, трейд-ин, график, что говорить. Сохраняется автоматически. Потом скачайте отчёт и пришлите его Claude — пояснения будут собраны в короткие факты салона для агента.</div>
+      <div class="muted small" style="margin-top:6px">37 вопросов, объединённых по смыслу из всех чатов архива. Ответ даёт стратегия «Простая» на GPT-4o mini${''} (машина — из поля «Автомобиль» ниже, если выбрана). В правой колонке напишите или надиктуйте 🎤 наши условия и особенности: кредитные программы, скидки, трейд-ин, график, что говорить. Сохраняется автоматически. Потом скачайте отчёт и пришлите его Claude — пояснения будут собраны в короткие факты салона для агента.</div>
+      <div class="ask-box">
+        <label>Автомобиль из кабинета <span class="field-help" style="display:inline">— для быстрых вопросов и для кнопки «Сгенерировать»</span>
+          <select id="askItem"><option value="">без машины (агент не знает наличие)</option>${[['in_stock', 'В наличии'], ['in_transit', 'В пути'], ['on_order', 'Под заказ'], ['', 'Наличие не указано']].map(([k, l]) => {
+            const list = cfg.items.filter((it) => (it.availability || '') === k);
+            return list.length ? `<optgroup label="${l} (${list.length})">${list.map((it) => `<option value="${esc(it.key)}" ${L.item === it.key ? 'selected' : ''}>${esc(it.title)}${it.price ? ' · ' + Number(it.price).toLocaleString('ru-RU') + ' ₽' : ''}</option>`).join('')}</optgroup>` : '';
+          }).join('')}</select></label>
+        <label style="margin-top:8px">Вопрос клиента <span class="field-help" style="display:inline">— несколько сообщений подряд разделяйте пустой строкой</span>
+          <textarea id="askText" rows="2" placeholder="Здравствуйте! Авто в наличии?"></textarea></label>
+        <div class="row small" style="margin-top:6px;gap:6px">
+          ${['Здравствуйте! Авто в наличии?', 'Какая окончательная цена за наличные?', 'Когда можно приехать посмотреть?', 'Какие условия кредита?'].map((t) => `<button class="chip" data-askq="${esc(t)}">${esc(t)}</button>`).join('')}
+          <span class="spacer"></span><button class="btn sm" id="askMic">🎤</button><button class="btn primary sm" id="askGo">Спросить агента</button></div>
+        <div class="muted small" id="askState"></div>
+        <div id="askOut"></div>
+      </div>
       <div id="arcNotes" style="margin-top:12px"></div></div>
     <div class="notice info" style="margin-bottom:16px">Лаборатория сравнивает стратегии общения на разных моделях на одних и тех же учебных вопросах. Изолирована от работы: не пишет в Авито, не трогает чаты, лиды и уведомления. Факты в сценариях учебные, не действующие цены.</div>
     <div class="card"><h3>1. Что сравниваем</h3>
@@ -1232,7 +1246,7 @@ async function renderLab() {
   $('#labAll').addEventListener('click', () => { cfg.cases.filter((c) => c.set_name === L.set).forEach((c) => L.cases.add(c.id)); $$('[data-lc]').forEach((i) => { i.checked = true; }); updEst(); });
   $('#labNone').addEventListener('click', () => { L.cases.clear(); $$('[data-lc]').forEach((i) => { i.checked = false; }); updEst(); });
   $('#labRep').addEventListener('change', updEst);
-  $('#labItem').addEventListener('change', (e) => { L.item = e.target.value; updEst(); });
+  $('#labItem').addEventListener('change', (e) => { L.item = e.target.value; const a = $('#askItem'); if (a) a.value = L.item; updEst(); });
   $('#custAdd').addEventListener('click', async () => {
     try {
       const r = await api('/api/lab/case', { body: { text: $('#custText').value, facts: $('#custFacts').value.trim() || undefined } });
@@ -1375,6 +1389,24 @@ async function renderLab() {
       if (j?.errors) toast(`Ошибок: ${j.errors}. ${j.error || ''}`, true);
     }, 2000);
     state.timers.push(t);
+  });
+  // ----- быстрый вопрос агенту по реальной машине -----
+  const AV = { in_stock: 'в наличии', in_transit: 'в пути', on_order: 'под заказ' };
+  $('#askItem').addEventListener('change', (e) => { L.item = e.target.value; const sel = $('#labItem'); if (sel) sel.value = L.item; updEst(); });
+  $$('[data-askq]').forEach((b) => b.addEventListener('click', () => { $('#askText').value = b.dataset.askq; $('#askText').focus(); }));
+  $('#askMic').addEventListener('click', () => voiceInput($('#askMic'), $('#askState'), (t) => { $('#askText').value = ($('#askText').value.trim() ? $('#askText').value.trim() + ' ' : '') + t; $('#askState').textContent = ''; }));
+  $('#askGo').addEventListener('click', async () => {
+    const btn = $('#askGo'); btn.disabled = true; $('#askState').textContent = 'агент отвечает…';
+    try {
+      const { run: r } = await api('/api/lab/ask', { body: { itemKey: L.item || null, text: $('#askText').value } });
+      const it = cfg.items.find((x) => x.key === L.item);
+      $('#askOut').insertAdjacentHTML('afterbegin', `<div class="draft ${r.status === 'error' ? 'bad' : ''}" style="max-width:none;margin-top:10px">
+        <div class="draft-head"><b>${it ? esc(it.title) + ' · ' + (AV[it.availability] || 'наличие не указано') : 'без машины'}</b> · ${esc(r.v_key || '')} ${esc(r.v_version || '')} · ${esc(r.model_label || r.model || '')}${r.ms ? ' · ' + (r.ms / 1000).toFixed(1) + ' с' : ''}</div>
+        ${r.status === 'error' ? `<div style="color:var(--red)">Ошибка: ${esc(r.error)}</div>` : ''}
+        ${(r.turns || []).map((t) => `<div class="client-says small" style="margin:6px 0">${esc(t.client)}</div><div class="draft-text">${esc(t.reply ?? '')}</div>`).join('')}</div>`);
+      $('#askState').textContent = '';
+    } catch (e) { $('#askState').textContent = 'Ошибка: ' + e.message; }
+    btn.disabled = false;
   });
   loadNotes();
   watchJob('lab', $('#labJob'), 'Модели отвечают…', async () => { await loadBatches(true); loadSum(); loadGrid(); loadNotes(); });

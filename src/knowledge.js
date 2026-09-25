@@ -114,7 +114,7 @@ const effAvail = (it) => it.availability_manual || it.availability || null;
 
 const AVAIL_PROMPT = {
   in_stock: 'В НАЛИЧИИ — автомобиль в салоне, можно приехать посмотреть и оформить.',
-  in_transit: 'В ПУТИ — автомобиля ещё нет в салоне, он едет к нам. Не говори «в наличии»: скажи, что машина в пути, её можно забронировать, точную дату поступления уточнит менеджер.',
+  in_transit: 'В ПУТИ — автомобиль на складе в другом филиале, в течение 1–2 дней можем переместить его в наш автосалон. Не говори «в наличии в салоне».',
   on_order: 'ПОД ЗАКАЗ — автомобиля нет в салоне, его привозят под клиента. Сроки и условия заказа уточнит менеджер.',
 };
 
@@ -315,7 +315,13 @@ async function importFeed(url) {
   return { count: total, mapped, url: urls.join(', '), ...st };
 }
 
+/** Факты салона, утверждённые владельцем (src/salon_facts.md) — общие для рабочего агента и «Лаборатории». */
+function salonFacts() {
+  try { return require('node:fs').readFileSync(require('node:path').join(__dirname, 'salon_facts.md'), 'utf8').trim(); } catch { return ''; }
+}
+
 module.exports = {
+  salonFacts, AVAIL_PROMPT,
   AVAIL_RU, detectAvailability, KB_CATEGORIES, selectKb, kbPromptSections, itemCard, getItem, stockList, itemsStats,
   importItemsFromApi, importFeed, parseFeed, htmlToText, fetchFeedUrl, fmtPrice,
 };
