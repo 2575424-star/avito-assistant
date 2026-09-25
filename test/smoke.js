@@ -367,7 +367,7 @@ async function step(name, fn) {
   await step('вопросы из архива: ответ агента, пояснения, голос, отчёт', async () => {
     const cfg = (await api('/api/lab/config')).data;
     const arc = cfg.cases.filter((c) => c.set_name === 'archive');
-    assert.equal(arc.length, 36);
+    assert.equal(arc.length, 37);
     const simple = cfg.strategies.find((x) => x.key === 'simple');
     const mini = cfg.models.find((x) => x.model === 'gpt-4o-mini');
     const r = await api('/api/lab/run', { caseIds: arc.map((c) => c.id), versionIds: [simple.id], modelIds: [mini.id], limitUsd: 1, concurrency: 4 });
@@ -375,16 +375,38 @@ async function step(name, fn) {
     const job = await waitJob('lab');
     assert.equal(job.errors, 0);
     let notes = (await api('/api/lab/notes?set=archive')).data.notes;
-    assert.equal(notes.length, 36);
+    assert.equal(notes.length, 37);
     assert.ok(notes.every((n) => n.answer && n.answer.by.includes('simple')), 'у каждого вопроса есть ответ «Простой»');
     assert.equal(notes.find((n) => n.id === 'ARC35').answer.turns.length, 2, 'ситуация «клиент прислал номер» — двухходовая');
+    // тип объявления доходит до агента вместе с фактами салона
+    await api('/api/lab/run', { caseIds: ['ARC01B'], versionIds: [simple.id], modelIds: [mini.id], limitUsd: 1 });
+    await waitJob('lab');
+    const sysT = (await counters()).systems['gpt-4o-mini'];
+    assert.match(sysT, /ФАКТЫ САЛОНА/);
+    assert.match(sysT, /НАЛИЧИЕ: В ПУТИ — автомобиль на складе в другом филиале/);
+    assert.doesNotMatch(sysT, /availability_key/);
+    await api('/api/lab/run', { caseIds: ['ARC01'], versionIds: [simple.id], modelIds: [mini.id], limitUsd: 1 });
+    await waitJob('lab');
+    assert.match((await counters()).systems['gpt-4o-mini'], /НАЛИЧИЕ: В НАЛИЧИИ/);
+    // быстрый вопрос по реальной машине из кабинета
+    const it = cfg.items.find((x) => x.availability) || cfg.items[0];
+    const ask = await api('/api/lab/ask', { itemKey: it.key, text: 'Здравствуйте! Авто в наличии?' });
+    assert.equal(ask.status, 200, JSON.stringify(ask.data));
+    assert.equal(ask.data.run.status, 'ok');
+    assert.equal(ask.data.run.v_key, 'simple');
+    const sysA = (await counters()).systems['gpt-4o-mini'];
+    assert.match(sysA, /АВТОМОБИЛЬ ИЗ ОБЪЯВЛЕНИЯ/);
+    assert.match(sysA, /НАЛИЧИЕ: /);
+    assert.equal((await api('/api/lab/ask', { itemKey: it.key, text: '  ' })).status, 400);
+    const chats = (await api('/api/chats?limit=200')).data.chats;
+    assert.ok(chats.some((c) => 'item_availability' in c), 'в списке чатов есть наличие объявления');
     assert.equal((await api('/api/lab/notes', { case_id: 'ARC07', note: 'Кредит: банки-партнёры, взнос от 0%' })).status, 200);
     assert.equal((await api('/api/lab/notes', { case_id: 'NOPE', note: 'x' })).status, 400);
     notes = (await api('/api/lab/notes?set=archive')).data.notes;
     assert.equal(notes.find((n) => n.id === 'ARC07').note, 'Кредит: банки-партнёры, взнос от 0%');
     const csv = await (await fetch(base + '/api/lab/notes.csv', )).text();
     assert.ok(csv.includes('Кредит: банки-партнёры') && csv.includes('Условия кредита'), 'в отчёте вопрос и пояснение');
-    assert.equal((csv.match(/^"ARC\d\d"/gm) || []).length, 36);
+    assert.equal((csv.match(/^"ARC\d\dB?"/gm) || []).length, 37);
     // голос: запись уходит на распознавание ключом GPT-4o mini, текст возвращается
     const tr = await fetch(base + '/api/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/webm;codecs=opus' }, body: Buffer.from('fake-audio') });
     const td = await tr.json();

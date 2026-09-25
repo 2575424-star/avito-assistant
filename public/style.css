@@ -256,3 +256,4 @@ tr.expand td { background: var(--panel-2); }
 /* вопросы из архива: вопрос | ответ агента | пояснение */
 .arc-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
 .arc-row textarea { width: 100%; }
+.ask-box { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }

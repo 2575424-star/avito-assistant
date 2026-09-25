@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const { db, getSetting, setSetting, logEvent } = require('./db');
 const llm = require('./llm');
 const chatstate = require('./chatstate');
-const { itemCard } = require('./knowledge'); // только форматирование карточки, без обращений к Авито
+const { itemCard, salonFacts, AVAIL_PROMPT } = require('./knowledge'); // только форматирование карточки, без обращений к Авито
 
 const now = () => Math.floor(Date.now() / 1000);
 const LAB_DIR = path.join(__dirname, 'lab');
@@ -106,8 +106,13 @@ function buildPrompt(version, kase, history, item = null) {
     // у реальной машины наличие своё — оно важнее условия сценария
     if (item.availability_manual || item.availability) { delete facts.availability; delete facts.eta; delete facts.eta_confirmed; }
   }
+  // тип объявления из сценария (в наличии / в пути), если реальная машина не выбрана
+  const availKey = facts.availability_key; delete facts.availability_key;
   const parts = [version.base_prompt];
   if (version.strategy) parts.push(version.strategy);
+  const sf = salonFacts();
+  if (sf) parts.push(sf);
+  if (!item && AVAIL_PROMPT[availKey]) parts.push('ОБЪЯВЛЕНИЕ, ПО КОТОРОМУ ПИШЕТ КЛИЕНТ:\nНАЛИЧИЕ: ' + AVAIL_PROMPT[availKey]);
   if (item) parts.push('АВТОМОБИЛЬ ИЗ ОБЪЯВЛЕНИЯ (подтверждённые данные):\n' + itemCard(item) + '\n\nФакты ниже (кредит, трейд-ин, сроки, полномочия компании) дополняют карточку.');
   parts.push('ФАКТЫ (считать подтверждёнными на сегодня; null или отсутствие поля — данных нет):\n' + JSON.stringify(facts, null, 1));
   if (!version.key?.startsWith('gpt_egor_')) parts.push(chatstate.cpaPromptLine(chatstate.cpaState(history)));
@@ -377,6 +382,25 @@ function exportCsv({ batch } = {}) {
   return '\ufeff' + lines.join('\n');
 }
 
+// ---------- Быстрый вопрос по реальной машине (сразу ответ; сохраняется как свой вопрос) ----------
+async function ask({ itemKey, text, versionId, modelId }) {
+  const turns = String(text || '').split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  if (!turns.length) throw new Error('Напишите вопрос клиента');
+  const item = itemKey ? getItem(itemKey) : null;
+  if (itemKey && !item) throw new Error('Автомобиль не найден в базе знаний');
+  const version = versionId ? db.prepare('SELECT * FROM agent_versions WHERE id = ?').get(Number(versionId))
+    : db.prepare("SELECT * FROM agent_versions WHERE key = 'simple' ORDER BY id DESC").get();
+  const model = modelId ? models().find((m) => m.id === Number(modelId)) : models().find((m) => m.model === 'gpt-4o-mini');
+  if (!version || !model) throw new Error('Нет стратегии или модели');
+  if (!profileWithSecret(model.key_profile_id)?.api_key) throw new Error(`Нет ключа у ${model.label}: Настройки → Ключи и модели`);
+  const id = 'ASK' + Date.now().toString(36).toUpperCase();
+  const kase = { id, version: '1', title: turns[0].slice(0, 80), facts: {}, client_turns: turns, turn_mode: 'sequential_dialogue', expected: [] };
+  db.prepare('INSERT INTO lab_cases(id, set_name, version, title, facts, client_turns, turn_mode, expected, created) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run(id, 'custom', '1', kase.title, '{}', JSON.stringify(turns), kase.turn_mode, '[]', now());
+  const r = await runOne({ kase, version, model, batch: 'ask' + Date.now(), isStopped: () => false, item });
+  return runs({ caseId: id, limit: 1 })[0] || r;
+}
+
 // ---------- Пояснения владельца к вопросам (из них собираются факты салона для агента) ----------
 /** Вопросы набора + последний ответ агента (предпочтительно «Простая» × GPT-4o mini) + пояснение владельца. */
 function notes({ set = 'archive' } = {}) {
@@ -430,4 +454,4 @@ function exportAll({ batch } = {}) {
   };
 }
 
-module.exports = { notes, saveNote, notesCsv, transcribeProfile, batches, exportCsv, LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };
+module.exports = { ask, notes, saveNote, notesCsv, transcribeProfile, batches, exportCsv, LAB_KEYS, profiles, profileWithSecret, models, strategies, cases, buildPrompt, checkTurn, runOne, estimate, start, runs, rate, summary, exportAll, CRITERIA, mask };
